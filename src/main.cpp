@@ -32,12 +32,18 @@ const char* WIFI_PASS = "Fastweb10";
 
 #define RS485 Serial1
 #define BAUD_RATE 9600
-#define SEND_INTERVAL 10000
+#define SEND_INTERVAL 10000  // 10 sec
 
 // === Stato ventilconvettore ===
-uint16_t regConfig = 0x4003;  // bit 14=ON, bit 0-1=fan speed
-uint16_t regTemp   = 0x00CD;  // 20.5&deg;C (× 10)
-uint16_t regMode   = 0x0082;  // 0x0082=caldo, 0x0080=freddo
+// Reg 101: bit 14=FREDDO(blu), bit 13=CALDO(rosso), bit 7=STANDBY, bit 0-1=fan speed
+// ACCESO CALDO:  bit 13 set, bit 7 clear (es. 0x2003)
+// ACCESO FREDDO: bit 14 set, bit 7 clear (es. 0x4003)
+// SPENTO:        bit 7 set (es. 0x2083 = caldo+standby, 0x4083 = freddo+standby)
+uint16_t regConfig = 0x2003;  // caldo acceso (bit13), ventola MAX
+uint16_t regTemp   = 0x00CD;  // 20.5°C (× 10)
+uint16_t regMode   = 0x008A;  // modo stagionale
+bool     powerOn   = true;
+bool     heating   = true;    // true=caldo, false=freddo
 
 // === Web Server ===
 WebServer server(80);
@@ -77,9 +83,11 @@ void modbusWriteRegister(uint8_t addr, uint16_t reg, uint16_t value) {
 void sendAllRegisters() {
   Serial.println(">>> Invio registri...");
   modbusWriteRegister(0, 101, regConfig);
-  delay(1000);
+  delay(200);
+  yield();
   modbusWriteRegister(0, 102, regTemp);
-  delay(1000);
+  delay(200);
+  yield();
   modbusWriteRegister(0, 103, regMode);
   Serial.printf("    101=0x%04X 102=0x%04X(%.1f&deg;C) 103=0x%04X OK\n",
                 regConfig, regTemp, regTemp / 10.0, regMode);
@@ -87,9 +95,9 @@ void sendAllRegisters() {
 
 // === Helper per stato ===
 
-bool isOn()      { return (regConfig >> 14) & 1; }
+bool isOn()      { return powerOn; }
 int  fanSpeed()  { return regConfig & 0x03; }
-bool isHeating() { return (regMode & 0x02) ? true : false; }
+bool isHeating() { return heating; }
 float getTemp()  { return regTemp / 10.0; }
 
 const char* fanName() {
@@ -143,14 +151,20 @@ void handlePower() {
   String val = server.arg("value");
   val.toLowerCase();
   if (val == "on") {
-    regConfig |= (1 << 14);
+    regConfig &= ~((1 << 14) | (1 << 13) | (1 << 7));  // clear mode + standby
+    if (heating) regConfig |= (1 << 13);   // caldo = bit 13 (rosso)
+    else         regConfig |= (1 << 14);   // freddo = bit 14 (blu)
+    powerOn = true;
+    sendAllRegisters();
   } else if (val == "off") {
-    regConfig &= ~(1 << 14);
+    regConfig |= (1 << 7);   // bit 7 = standby → spegnimento istantaneo
+    powerOn = false;
+    sendAllRegisters();       // manda il comando di spegnimento
+    Serial.println(">>> SPENTO (bit 7 standby)");
   } else {
     server.send(400, "application/json", "{\"error\":\"value deve essere on o off\"}");
     return;
   }
-  sendAllRegisters();
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", statusJSON());
   Serial.printf("API: Power -> %s\n", val.c_str());
@@ -187,9 +201,13 @@ void handleMode() {
   String val = server.arg("value");
   val.toLowerCase();
   if (val == "heat") {
+    heating = true;
     regMode |= 0x02;
+    if (powerOn) { regConfig &= ~(1 << 14); regConfig |= (1 << 13); }  // caldo = bit 13
   } else if (val == "cool") {
+    heating = false;
     regMode &= ~0x02;
+    if (powerOn) { regConfig &= ~(1 << 13); regConfig |= (1 << 14); }  // freddo = bit 14
   } else {
     server.send(400, "application/json", "{\"error\":\"value deve essere heat o cool\"}");
     return;
@@ -285,6 +303,109 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
+void handleReg() {
+  if (!server.hasArg("reg") || !server.hasArg("val")) {
+    server.send(400, "text/plain", "manca reg o val");
+    return;
+  }
+  int reg = server.arg("reg").toInt();
+  uint16_t val = (uint16_t)strtol(server.arg("val").c_str(), NULL, 0);
+  if (reg == 101) regConfig = val;
+  else if (reg == 103) regMode = val;
+  modbusWriteRegister(0, reg, val);
+  delay(200);
+  yield();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", statusJSON());
+  Serial.printf("API: reg %d = 0x%04X\n", reg, val);
+}
+
+void handleTest() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>VISLA TEST</title>";
+  html += "<style>";
+  html += "body{font-family:monospace;max-width:500px;margin:10px auto;padding:0 10px;background:#111;color:#eee}";
+  html += "h2{color:#e94560;margin:15px 0 5px}";
+  html += "button{background:#333;color:#fff;border:1px solid #555;border-radius:6px;padding:10px 12px;";
+  html += "font-size:0.9em;cursor:pointer;margin:3px;font-family:monospace}";
+  html += "button:active{background:#e94560}";
+  html += "button.on{background:#27ae60}";
+  html += "#log{background:#000;padding:10px;border-radius:6px;font-size:0.8em;max-height:200px;overflow-y:auto;margin:10px 0}";
+  html += "</style></head><body>";
+  html += "<h1 style='color:#e94560'>VISLA - Test Registri</h1>";
+  html += "<div id='log'>Premi un bottone...</div>";
+
+  // Reg 101 tests
+  html += "<h2>REG 101 (config)</h2>";
+  html += "<button onclick='r(101,0x4003)'>0x4003 CALDO ON</button>";
+  html += "<button onclick='r(101,0x4001)'>0x4001 CALDO MIN</button>";
+  html += "<button onclick='r(101,0x4081)'>0x4081 CALDO+b7</button>";
+  html += "<button onclick='r(101,0x2003)'>0x2003 FREDDO?</button>";
+  html += "<button onclick='r(101,0x2083)'>0x2083 FREDDO+b7</button>";
+  html += "<button onclick='r(101,0x0003)'>0x0003 AUTO</button>";
+  html += "<button onclick='r(101,0x0000)'>0x0000 ZERO</button>";
+  html += "<button onclick='r(101,0x6003)'>0x6003 b14+b13</button>";
+  html += "<button onclick='r(101,0x8003)'>0x8003 b15</button>";
+  html += "<button onclick='r(101,0xC003)'>0xC003 b15+b14</button>";
+  html += "<button onclick='r(101,0xFFFF)'>0xFFFF TUTTI</button>";
+
+  // Reg 103 tests
+  html += "<h2>REG 103 (modo)</h2>";
+  html += "<button onclick='r(103,0x008A)'>0x008A (touch)</button>";
+  html += "<button onclick='r(103,0x0082)'>0x0082 caldo old</button>";
+  html += "<button onclick='r(103,0x0080)'>0x0080 freddo old</button>";
+  html += "<button onclick='r(103,0x0088)'>0x0088</button>";
+  html += "<button onclick='r(103,0x7FFF)'>0x7FFF</button>";
+  html += "<button onclick='r(103,0xFFFF)'>0xFFFF TUTTI</button>";
+  html += "<button onclick='r(103,0x0000)'>0x0000 ZERO</button>";
+
+  // Reg 102 tests
+  html += "<h2>REG 102 (temp)</h2>";
+  html += "<button onclick='r(102,0x00CD)'>20.5\\u00B0C</button>";
+  html += "<button onclick='r(102,0x0032)'>5.0\\u00B0C</button>";
+  html += "<button onclick='r(102,0x0000)'>0 (zero)</button>";
+  html += "<button onclick='r(102,0xFFFF)'>0xFFFF</button>";
+
+  // Special combos
+  html += "<h2>COMBO</h2>";
+  html += "<button style='background:#27ae60' onclick='combo([101,0x4003],[103,0x008A])'>ACCENDI CALDO</button>";
+  html += "<button style='background:#0f3460' onclick='combo([101,0x2003],[103,0x008A])'>ACCENDI FREDDO</button>";
+  html += "<button style='background:#e94560' onclick='spegni()'>SPEGNI (bit7)</button>";
+  html += "<button style='background:#e94560' onclick='stopSend()'>STOP INVIO (silenzio)</button>";
+
+  // Custom register input
+  html += "<h2>REGISTRO CUSTOM</h2>";
+  html += "<div style='display:flex;gap:5px;align-items:center;flex-wrap:wrap'>";
+  html += "<select id='creg'><option value='101'>101</option><option value='102'>102</option><option value='103'>103</option></select>";
+  html += "<input id='cval' type='text' placeholder='0x4083' style='background:#222;color:#fff;border:1px solid #555;border-radius:6px;padding:8px;font-family:monospace;width:100px'>";
+  html += "<button onclick='sendCustom()'>INVIA</button>";
+  html += "</div>";
+
+  // Copy log
+  html += "<h2>LOG</h2>";
+  html += "<button style='background:#555' onclick='copyLog()'>COPIA LOG</button>";
+
+  // JavaScript
+  html += "<script>";
+  html += "var logEl=document.getElementById('log');";
+  html += "function log(t){logEl.innerHTML=t+'<br>'+logEl.innerHTML}";
+  html += "function r(reg,val){";
+  html += "  log('Invio reg '+reg+' = 0x'+val.toString(16).toUpperCase()+'...');";
+  html += "  fetch('/api/reg?reg='+reg+'&val='+val).then(r=>r.json()).then(d=>{";
+  html += "    log('OK: 101='+d.reg101+' 102='+d.reg102+' 103='+d.reg103);";
+  html += "  }).catch(e=>log('ERRORE: '+e))}";
+  html += "function combo(){for(var i=0;i<arguments.length;i++){var a=arguments[i];r(a[0],a[1])}}";
+  html += "function spegni(){r(101,(regConfig|0x0080)>>>0)}";
+  html += "var regConfig=0x4003;";
+  html += "function stopSend(){fetch('/api/power?value=off').then(r=>r.json()).then(d=>log('STOP invio')).catch(e=>log('ERR:'+e))}";
+  html += "function sendCustom(){var reg=parseInt(document.getElementById('creg').value);var v=parseInt(document.getElementById('cval').value);if(isNaN(v)){log('Valore non valido');return}r(reg,v)}";
+  html += "function copyLog(){navigator.clipboard.writeText(logEl.innerText).then(()=>alert('Log copiato!')).catch(()=>{var t=document.createElement('textarea');t.value=logEl.innerText;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Log copiato!')})}";
+  html += "</script></body></html>";
+
+  server.send(200, "text/html", html);
+}
+
 void handleNotFound() {
   server.send(404, "application/json", "{\"error\":\"endpoint non trovato\"}");
 }
@@ -307,14 +428,43 @@ void processCommand(String cmd) {
       Serial.println("!!! Range 5-35&deg;C");
     }
   }
-  else if (cmd == "ON") { regConfig |= (1 << 14); Serial.println(">>> ACCESO"); changed = true; }
-  else if (cmd == "OFF") { regConfig &= ~(1 << 14); Serial.println(">>> SPENTO"); changed = true; }
+  else if (cmd == "ON") {
+    regConfig &= ~((1 << 14) | (1 << 13) | (1 << 7));  // clear mode + standby
+    if (heating) regConfig |= (1 << 13); else regConfig |= (1 << 14);  // caldo=bit13, freddo=bit14
+    powerOn = true; Serial.println(">>> ACCESO"); changed = true;
+  }
+  else if (cmd == "OFF") {
+    regConfig |= (1 << 7);   // bit 7 = standby
+    powerOn = false;
+    sendAllRegisters();
+    Serial.println(">>> SPENTO (bit 7 standby)");
+  }
   else if (cmd.startsWith("FAN") && cmd.length() == 4) {
     int s = cmd.charAt(3) - '0';
     if (s >= 0 && s <= 3) { regConfig = (regConfig & ~0x03) | (s & 0x03); changed = true; }
   }
-  else if (cmd == "HEAT") { regMode |= 0x02; changed = true; }
-  else if (cmd == "COOL") { regMode &= ~0x02; changed = true; }
+  else if (cmd == "HEAT") {
+    heating = true; regMode |= 0x02;
+    if (powerOn) { regConfig &= ~(1 << 14); regConfig |= (1 << 13); }  // caldo = bit 13
+    changed = true;
+  }
+  else if (cmd == "COOL") {
+    heating = false; regMode &= ~0x02;
+    if (powerOn) { regConfig &= ~(1 << 13); regConfig |= (1 << 14); }  // freddo = bit 14
+    changed = true;
+  }
+  else if (cmd.startsWith("R101 ")) {
+    uint16_t v = (uint16_t)strtol(cmd.c_str() + 5, NULL, 0);
+    regConfig = v;
+    Serial.printf(">>> REG 101 = 0x%04X\n", v);
+    changed = true;
+  }
+  else if (cmd.startsWith("R103 ")) {
+    uint16_t v = (uint16_t)strtol(cmd.c_str() + 5, NULL, 0);
+    regMode = v;
+    Serial.printf(">>> REG 103 = 0x%04X\n", v);
+    changed = true;
+  }
   else if (cmd == "STATUS") {
     Serial.println(statusJSON());
   }
@@ -399,6 +549,8 @@ void setup() {
     server.on("/api/fan", HTTP_GET, handleFan);
     server.on("/api/mode", HTTP_POST, handleMode);
     server.on("/api/mode", HTTP_GET, handleMode);
+    server.on("/api/reg", HTTP_GET, handleReg);
+    server.on("/test", handleTest);
     server.onNotFound(handleNotFound);
     server.begin();
     Serial.println("Web server avviato sulla porta 80");
@@ -435,8 +587,8 @@ void loop() {
     processRxByte((char)(raw & 0x7F));
   }
 
-  // Invio periodico
-  if (millis() - lastSend >= SEND_INTERVAL) {
+  // Invio periodico (solo quando acceso)
+  if (powerOn && millis() - lastSend >= SEND_INTERVAL) {
     lastSend = millis();
     sendAllRegisters();
   }

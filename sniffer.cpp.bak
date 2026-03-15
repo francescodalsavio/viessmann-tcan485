@@ -1,0 +1,166 @@
+/*
+ * VISLA Bus Sniffer — Ascolto passivo RS485
+ * Cattura e decodifica tutti i frame Modbus ASCII dal touch Viessmann
+ *
+ * NON trasmette nulla sul bus — solo ascolto!
+ * Collega il touch al bus e premi i vari pulsanti.
+ * I frame vengono decodificati e stampati sulla seriale USB.
+ */
+
+#include <Arduino.h>
+
+// === T-CAN485 Pin Definitions ===
+#define RS485_TX_PIN       22
+#define RS485_RX_PIN       21
+#define RS485_RE_PIN       17
+#define RS485_SHUTDOWN_PIN 19
+#define BOOST_ENABLE_PIN   16
+
+#define RS485 Serial1
+#define BAUD_RATE 9600
+
+// === Frame buffer ===
+#define MAX_FRAME_LEN 256
+char frameBuf[MAX_FRAME_LEN];
+int fPos = 0;
+bool fActive = false;
+
+unsigned long frameCount = 0;
+unsigned long lastFrameTime = 0;
+unsigned long groupStart = 0;
+int groupCount = 0;
+
+// Decodifica 2 caratteri hex in un byte
+uint8_t hexByte(char hi, char lo) {
+  auto hexVal = [](char c) -> uint8_t {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+  };
+  return (hexVal(hi) << 4) | hexVal(lo);
+}
+
+void decodeFrame(const char* frame, int len) {
+  if (len < 4) return;  // minimo: addr(2) + func(2)
+
+  // Parse bytes dal frame hex
+  int nBytes = len / 2;
+  uint8_t bytes[64];
+  for (int i = 0; i < nBytes && i < 64; i++) {
+    bytes[i] = hexByte(frame[i*2], frame[i*2+1]);
+  }
+
+  uint8_t addr = bytes[0];
+  uint8_t func = bytes[1];
+
+  if (func == 0x06 && nBytes >= 5) {
+    // Write Single Register
+    uint16_t reg = (bytes[2] << 8) | bytes[3];
+    uint16_t val = (bytes[4] << 8) | bytes[5];
+
+    Serial.printf("       Decode: addr=%d func=0x%02X reg=%d(0x%04X) val=0x%04X(%d)",
+                  addr, func, reg, reg, val, val);
+
+    // Interpretazione specifica dei registri noti
+    if (reg == 101) {
+      bool on = (val >> 14) & 1;
+      int fan = val & 0x03;
+      const char* fanNames[] = {"AUTO", "MIN", "NIGHT", "MAX"};
+      Serial.printf("  [CONFIG: %s, fan=%s", on ? "ON" : "OFF", fanNames[fan]);
+      // Mostra tutti i bit attivi
+      Serial.printf(", bits=");
+      for (int b = 15; b >= 0; b--) {
+        if ((val >> b) & 1) Serial.printf("%d,", b);
+      }
+      Serial.printf("]");
+    }
+    else if (reg == 102) {
+      Serial.printf("  [TEMP: %.1f C]", val / 10.0);
+    }
+    else if (reg == 103) {
+      if (val == 0x0082) Serial.printf("  [MODE: CALDO]");
+      else if (val == 0x0080) Serial.printf("  [MODE: FREDDO]");
+      else if (val == 0x7FFF) Serial.printf("  [MODE: 0x7FFF ???]");
+      else Serial.printf("  [MODE: 0x%04X ???]", val);
+    }
+    Serial.println();
+  } else {
+    Serial.printf("       Decode: addr=%d func=0x%02X data(%d bytes)\n", addr, func, nBytes - 2);
+  }
+}
+
+void processRxByte(char c) {
+  unsigned long now = millis();
+
+  if (c == ':') {
+    fPos = 0;
+    fActive = true;
+  }
+  else if (c == '\r') {}
+  else if (c == '\n' && fActive) {
+    frameBuf[fPos] = '\0';
+    if (fPos > 0) {
+      frameCount++;
+
+      // Detecta nuovo gruppo (>2 sec dal frame precedente)
+      if (now - lastFrameTime > 2000) {
+        groupCount++;
+        groupStart = now;
+        Serial.printf("\n===== GRUPPO #%d (t=%.1fs dall'avvio) =====\n",
+                      groupCount, now / 1000.0);
+      }
+
+      // Stampa frame con timestamp
+      Serial.printf("[%6lums +%4lums] #%lu :%s\n",
+                    now, now - lastFrameTime, frameCount, frameBuf);
+
+      // Decodifica
+      decodeFrame(frameBuf, fPos);
+
+      lastFrameTime = now;
+    }
+    fActive = false;
+    fPos = 0;
+  }
+  else if (fActive && fPos < MAX_FRAME_LEN - 1) {
+    frameBuf[fPos++] = c;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  Serial.println("\n=============================================");
+  Serial.println("  VISLA Bus Sniffer — Ascolto passivo");
+  Serial.println("  NON trasmette nulla sul bus!");
+  Serial.println("=============================================");
+  Serial.println();
+  Serial.println("Istruzioni:");
+  Serial.println("  1. Collega il touch Viessmann al bus (fili A/B)");
+  Serial.println("  2. Premi i vari pulsanti sul touch");
+  Serial.println("  3. Ogni frame catturato viene decodificato qui");
+  Serial.println();
+  Serial.println("In attesa di frame sul bus...\n");
+
+  // Init RS485 in modalita' solo ricezione
+  pinMode(BOOST_ENABLE_PIN, OUTPUT);
+  digitalWrite(BOOST_ENABLE_PIN, HIGH);
+  delay(100);
+  pinMode(RS485_SHUTDOWN_PIN, OUTPUT);
+  digitalWrite(RS485_SHUTDOWN_PIN, HIGH);
+  pinMode(RS485_RE_PIN, OUTPUT);
+  digitalWrite(RS485_RE_PIN, HIGH);  // RE=HIGH abilita ricezione
+  RS485.begin(BAUD_RATE, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
+  delay(200);
+
+  lastFrameTime = millis();
+}
+
+void loop() {
+  while (RS485.available()) {
+    uint8_t raw = RS485.read();
+    processRxByte((char)(raw & 0x7F));  // strip bit 7 (7E1 -> 8N1)
+  }
+}

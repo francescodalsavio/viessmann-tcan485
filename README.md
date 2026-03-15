@@ -33,30 +33,33 @@ Sulla morsettiera RS485 del T-CAN485 ci sono 3 viti: **A**, **GND** (centrale), 
 
 | Registro | Funzione | Valori |
 |----------|----------|--------|
-| **101** | Configurazione | Bit 14: ON(1)/OFF(0). Bit 0-1: velocita' ventola |
+| **101** | Configurazione | Bit 14: freddo(blu), Bit 13: caldo(rosso), Bit 7: standby, Bit 0-1: ventola |
 | **102** | Temperatura setpoint | Valore × 10 (es. 205 = 20.5°C) |
-| **103** | Modo stagionale | 0x0082 = caldo, 0x0080 = freddo |
+| **103** | Modo stagionale | 0x008A (valore fisso usato dal touch) |
 
 ### Registro 101 — Dettaglio bit
 
 | Bit | Funzione | Valori |
 |-----|----------|--------|
 | 0-1 | Velocita' ventola | 0=AUTO, 1=MIN, 2=NIGHT, 3=MAX |
-| 14 | Acceso/Spento | 0=spento, 1=acceso |
+| 7 | Standby (spegnimento) | 0=attivo, 1=standby (LED spenti) |
+| 13 | Modo caldo | 1=riscaldamento (LED rosso) |
+| 14 | Modo freddo | 1=raffrescamento (LED blu) |
 
 Esempi:
-- `0x4003` = acceso + ventola MAX
-- `0x4000` = acceso + ventola AUTO
-- `0x0003` = spento + ventola MAX
+- `0x2003` = caldo acceso, ventola MAX (bit 13 + bit 0-1)
+- `0x4003` = freddo acceso, ventola MAX (bit 14 + bit 0-1)
+- `0x2083` = caldo standby (bit 13 + bit 7 → LED spenti)
+- `0x4083` = freddo standby (bit 14 + bit 7 → LED spenti)
+- `0x2000` = caldo acceso, ventola AUTO
 
 ### Registro 103 — Modo stagionale
 
 | Valore | Significato |
 |--------|-------------|
-| `0x0082` | Riscaldamento (caldo) |
-| `0x0080` | Raffrescamento (freddo) |
+| `0x008A` | Valore standard (usato dal touch in tutte le condizioni) |
 
-Il bit 1 controlla caldo(1)/freddo(0).
+**Nota**: il touch originale invia sempre `0x008A` sia in caldo che in freddo. La distinzione caldo/freddo e' gestita solo dal registro 101 (bit 13/14).
 
 ## Comandi via seriale (USB)
 
@@ -75,7 +78,9 @@ Collegare il T-CAN485 al computer via USB-C e aprire il monitor seriale a **1152
 | `COOL` | Modo raffrescamento | |
 | `STATUS` | Mostra stato attuale | |
 | `SEND` | Forza invio immediato dei registri | |
-| `HELP` | Mostra lista comandi | |
+| `R101 0x2003` | Scrivi valore raw nel registro 101 | `R101 0x2083` → standby |
+| `R103 0x008A` | Scrivi valore raw nel registro 103 | |
+| `IP` | Mostra indirizzo IP | |
 
 ## Compilazione e flash
 
@@ -133,12 +138,19 @@ Esempio — il comando touch invia:
 
 | Parametro | Valori possibili | Registro |
 |-----------|-----------------|----------|
-| **ON/OFF** | Acceso / Spento | Reg 101, bit 14 |
+| **ON/OFF** | Acceso / Standby | Reg 101, bit 7 (0=acceso, 1=standby) |
+| **Caldo/Freddo** | Riscaldamento / Raffrescamento | Reg 101, bit 13=caldo, bit 14=freddo |
 | **Ventola** | AUTO, MIN, NIGHT, MAX | Reg 101, bit 0-1 |
 | **Temperatura** | 5.0°C — 35.0°C (passi da 0.1°C) | Reg 102 |
-| **Stagione** | Caldo / Freddo | Reg 103, bit 1 |
 
 In totale: 2 (on/off) × 4 (ventola) × 301 (temperature) × 2 (caldo/freddo) = **4816 combinazioni**.
+
+### Pagine Web
+
+| URL | Descrizione |
+|-----|-------------|
+| `http://192.168.0.80/` | Interfaccia principale (controllo temperatura, on/off, ventola, stagione) |
+| `http://192.168.0.80/test` | Pagina di test registri (invio valori raw, registro custom, log con copia) |
 
 ### Esempi pratici
 
@@ -154,12 +166,13 @@ In totale: 2 (on/off) × 4 (ventola) × 301 (temperature) × 2 (caldo/freddo) = 
 
 | Scenario | Reg 101 | Reg 102 | Reg 103 |
 |----------|---------|---------|---------|
-| Acceso, caldo, 25°C, ventola MAX | `0x4003` | `0x00FA` (250) | `0x0082` |
-| Acceso, caldo, 20°C, ventola NIGHT | `0x4002` | `0x00C8` (200) | `0x0082` |
-| Acceso, freddo, 18°C, ventola MAX | `0x4003` | `0x00B4` (180) | `0x0080` |
-| Acceso, freddo, 22°C, ventola MIN | `0x4001` | `0x00DC` (220) | `0x0080` |
-| Acceso, caldo, 22°C, ventola AUTO | `0x4000` | `0x00DC` (220) | `0x0082` |
-| Spento | `0x0003` | (invariato) | (invariato) |
+| Acceso, caldo, 25°C, ventola MAX | `0x2003` | `0x00FA` (250) | `0x008A` |
+| Acceso, caldo, 20°C, ventola NIGHT | `0x2002` | `0x00C8` (200) | `0x008A` |
+| Acceso, freddo, 18°C, ventola MAX | `0x4003` | `0x00B4` (180) | `0x008A` |
+| Acceso, freddo, 22°C, ventola MIN | `0x4001` | `0x00DC` (220) | `0x008A` |
+| Acceso, caldo, 22°C, ventola AUTO | `0x2000` | `0x00DC` (220) | `0x008A` |
+| Spento (standby caldo) | `0x2083` | (invariato) | `0x008A` |
+| Spento (standby freddo) | `0x4083` | (invariato) | `0x008A` |
 
 ## Come sono stati scoperti i registri
 
@@ -203,8 +216,8 @@ Il comando touch trasmette autonomamente ogni ~67 secondi, sempre 3 frame:
 ### Passo 5 — Interpretazione dei valori
 
 - **Reg 102**: valore `0x00CD` = 205. Il display del touch mostrava 20.5°C → quindi il valore = temperatura × 10
-- **Reg 101**: valore `0x4003` = `0100 0000 0000 0011` in binario. Bit 14=1 (acceso), bit 0-1=11 (ventola MAX). Coerente con documentazione di ventilconvettori simili
-- **Reg 103**: `0x0082` vs `0x0080` — il bit 1 distingue caldo/freddo (da documentazione e test)
+- **Reg 101**: valore `0x4003` = `0100 0000 0000 0011` in binario. Bit 14=freddo(blu), bit 13=caldo(rosso), bit 7=standby, bit 0-1=11 (ventola MAX). Scoperto tramite sniffing passivo e test sistematici con pagina web di debug
+- **Reg 103**: il touch invia sempre `0x008A` sia in caldo che in freddo. La distinzione caldo/freddo e' nel registro 101
 
 ### Passo 6 — Verifica che il touch sovrascrive
 
@@ -263,7 +276,7 @@ Vedi la sezione "Come sono stati scoperti i registri" per tutti i dettagli.
 ### Cosa succede se il T-CAN485 si spegne o perde WiFi?
 
 - **Se perde WiFi**: continua a mandare comandi Modbus via RS485 normalmente. Il ventilconvettore funziona, solo non puoi controllarlo da remoto finche' il WiFi non torna.
-- **Se si spegne**: il ventilconvettore non riceve piu' comandi e resta nell'ultimo stato impostato (ma non si spegne da solo).
+- **Se si spegne**: il ventilconvettore non riceve piu' comandi. Dopo un timeout si spegne da solo (il fan coil ha un watchdog interno che va in standby se non riceve comandi per un certo periodo).
 
 ### Posso controllare tutti e 5 i ventilconvettori con un solo T-CAN485?
 
@@ -286,6 +299,9 @@ Ma per ora REST e' perfetto e il piu' semplice da usare.
 
 - [x] Controllo base via seriale USB
 - [x] WiFi + API REST + pagina web
+- [x] Reverse engineering completo registri (bit 7=standby, bit 13=caldo, bit 14=freddo)
+- [x] Spegnimento istantaneo via bit 7 (standby)
+- [x] Pagina di test registri (/test) con registro custom e log
 - [ ] Estendere a tutti e 5 i ventilconvettori (controllo individuale)
 - [ ] Sostituire comando touch con ESP32 touchscreen a parete
 - [ ] Integrazione con backend VISLA

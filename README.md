@@ -220,10 +220,75 @@ Con il comando touch scollegato:
 
 Tutto confermato funzionante.
 
+## FAQ — Domande e risposte
+
+### Come collego il LilyGo T-CAN485 al ventilconvettore?
+
+Due fili dal retro del comando touch del ventilconvettore:
+- **Filo bianco** (morsetto A) → morsetto **A** del T-CAN485
+- **Filo marrone** (morsetto B) → morsetto **B** del T-CAN485
+
+Sulla morsettiera RS485 del T-CAN485 ci sono 3 viti: **A** (sinistra), **GND** (centro), **B** (destra). Usa solo A e B, lascia GND vuoto. Alimenta il T-CAN485 via USB-C.
+
+### Ma la morsettiera RS485 ha 3 viti, non 2!
+
+Si', la vite centrale e' GND. Lasciala vuota. Collega solo le due esterne (A e B).
+
+### Posso usare il comando touch e il T-CAN485 insieme?
+
+No, non conviene. Il comando touch e' anche lui un master Modbus e trasmette ogni ~67 secondi. Sovrascrive i comandi del T-CAN485. Chi parla per ultimo vince, e il touch vince sempre perche' continua a ripetere.
+
+**Soluzione**: scollegare i fili A/B dal comando touch. Il touch resta alimentato e mostra la temperatura dal sensore NTC, ma non comanda piu' il ventilconvettore.
+
+### Come faccio a controllare il ventilconvettore localmente senza il touch?
+
+Tre opzioni:
+1. **Pagina web** da telefono: apri http://192.168.0.80 dal browser (stessa rete WiFi)
+2. **Seriale USB**: collega il T-CAN485 al PC e usa i comandi testuali (T22.5, ON, OFF, ecc.)
+3. **ESP32 con touchscreen**: sostituire il comando touch con un ESP32 touchscreen montato a parete (progetto futuro)
+
+### La pagina web http://192.168.0.80 da dove viene?
+
+E' servita direttamente dall'ESP32 dentro il T-CAN485. L'ESP32 fa tutto: web server + WiFi + RS485 Modbus. Non serve nessun server esterno.
+
+### Come ho scoperto il protocollo?
+
+Il Viessmann usa **Modbus ASCII** (non RTU). Lo abbiamo scoperto perche':
+1. I dati sul bus iniziavano con `:` (0x3A) → tipico di Modbus ASCII
+2. Alcuni byte avevano il bit 7 alto → il dispositivo usa 7E1 (parita' pari)
+3. Strippando il bit 7, i frame diventavano Modbus ASCII validi con LRC corretto
+
+Vedi la sezione "Come sono stati scoperti i registri" per tutti i dettagli.
+
+### Cosa succede se il T-CAN485 si spegne o perde WiFi?
+
+- **Se perde WiFi**: continua a mandare comandi Modbus via RS485 normalmente. Il ventilconvettore funziona, solo non puoi controllarlo da remoto finche' il WiFi non torna.
+- **Se si spegne**: il ventilconvettore non riceve piu' comandi e resta nell'ultimo stato impostato (ma non si spegne da solo).
+
+### Posso controllare tutti e 5 i ventilconvettori con un solo T-CAN485?
+
+In teoria si', perche' sono tutti sullo stesso bus daisy-chain. Ma attualmente mandiamo in broadcast (indirizzo 0) quindi tutti e 5 ricevono lo stesso comando. Per controllarli individualmente servirebbe sapere se ogni scheda motore ha un indirizzo diverso.
+
+### Perche' l'intervallo di invio e' 10 secondi?
+
+Il comando touch originale invia ogni ~67 secondi. Noi inviamo ogni 10 secondi per maggiore reattivita' quando cambi un parametro dalla pagina web. Non causa problemi al ventilconvettore.
+
+### REST API e' il protocollo migliore per questo?
+
+Per controllo locale da browser va benissimo. Per il futuro, **MQTT** sarebbe meglio per:
+- Integrazione con Home Assistant
+- Comunicazione real-time con il backend VISLA
+- Minor overhead su ESP32
+
+Ma per ora REST e' perfetto e il piu' semplice da usare.
+
 ## TODO
 
-- [ ] Aggiungere WiFi con API REST per controllo da browser/telefono
-- [ ] Estendere a tutti e 5 i ventilconvettori
+- [x] Controllo base via seriale USB
+- [x] WiFi + API REST + pagina web
+- [ ] Estendere a tutti e 5 i ventilconvettori (controllo individuale)
+- [ ] Sostituire comando touch con ESP32 touchscreen a parete
 - [ ] Integrazione con backend VISLA
+- [ ] MQTT per comunicazione real-time
 - [ ] Geofencing GPS (accendi quando arrivi a casa)
 - [ ] Programmazione oraria (mattina, sera, notte, weekend)

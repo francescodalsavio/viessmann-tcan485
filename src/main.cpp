@@ -2,25 +2,26 @@
  * VISLA Modbus Controller per LilyGo T-CAN485
  * Viessmann Energycal Slim W — SOSTITUZIONE COMANDO TOUCH
  *
- * Replica il comportamento del comando touch:
- * Invia Write Single Register (0x06) in broadcast (addr 0)
- * su registri 101, 102, 103 ogni ~60 secondi.
+ * Controllo via:
+ *   1. Seriale USB (comandi testuali)
+ *   2. API REST via WiFi (http://<ip>/api/...)
  *
- * Accetta comandi via Serial (USB) per cambiare parametri:
- *   T22.5  → imposta temperatura 22.5°C
- *   ON     → accendi
- *   OFF    → spegni
- *   FAN0   → ventilatore AUTO
- *   FAN1   → ventilatore MIN
- *   FAN2   → ventilatore NIGHT
- *   FAN3   → ventilatore MAX
- *   HEAT   → modo riscaldamento
- *   COOL   → modo raffrescamento
- *   STATUS → mostra stato attuale
- *   SEND   → forza invio immediato
+ * API REST endpoints:
+ *   GET  /api/status              → stato JSON
+ *   POST /api/temperature?value=22.5
+ *   POST /api/power?value=on|off
+ *   POST /api/fan?value=0|1|2|3   (auto/min/night/max)
+ *   POST /api/mode?value=heat|cool
  */
 
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+// === WiFi Config ===
+// CAMBIA QUESTI CON I TUOI DATI!
+const char* WIFI_SSID = "Molinella";
+const char* WIFI_PASS = "Fastweb10";
 
 // === T-CAN485 Pin Definitions ===
 #define RS485_TX_PIN       22
@@ -31,19 +32,15 @@
 
 #define RS485 Serial1
 #define BAUD_RATE 9600
-#define SEND_INTERVAL 10000  // Invio ogni 10 secondi (più frequente del touch per reattività)
+#define SEND_INTERVAL 10000
 
 // === Stato ventilconvettore ===
-// Reg 101 (0x4003 di default):
-//   bit 0-1: velocità ventilatore (0=AUTO, 1=MIN, 2=NIGHT, 3=MAX)
-//   bit 14: acceso (1) / spento (0)
-uint16_t regConfig = 0x4003;  // Default: acceso, fan AUTO? (bit0=1,bit1=1 → fan MAX?)
+uint16_t regConfig = 0x4003;  // bit 14=ON, bit 0-1=fan speed
+uint16_t regTemp   = 0x00CD;  // 20.5&deg;C (× 10)
+uint16_t regMode   = 0x0082;  // 0x0082=caldo, 0x0080=freddo
 
-// Reg 102: temperatura setpoint × 10
-uint16_t regTemp = 0x00CD;    // Default: 20.5°C (205)
-
-// Reg 103: modo stagionale
-uint16_t regMode = 0x0082;    // Default dal touch
+// === Web Server ===
+WebServer server(80);
 
 // === Utilità Modbus ASCII ===
 
@@ -77,162 +74,274 @@ void modbusWriteRegister(uint8_t addr, uint16_t reg, uint16_t value) {
   RS485.flush();
 }
 
-// Invia tutti i registri al ventilconvettore (come faceva il touch)
 void sendAllRegisters() {
-  Serial.println(">>> Invio registri al ventilconvettore:");
-  Serial.printf("    Reg 101 = 0x%04X (config)\n", regConfig);
-  Serial.printf("    Reg 102 = 0x%04X (%.1f°C)\n", regTemp, regTemp / 10.0);
-  Serial.printf("    Reg 103 = 0x%04X (modo)\n", regMode);
-
+  Serial.println(">>> Invio registri...");
   modbusWriteRegister(0, 101, regConfig);
-  delay(1000);  // Pausa tra frame come il touch (~1.1 sec)
-
+  delay(1000);
   modbusWriteRegister(0, 102, regTemp);
   delay(1000);
-
   modbusWriteRegister(0, 103, regMode);
-
-  Serial.println("    OK - inviati!");
+  Serial.printf("    101=0x%04X 102=0x%04X(%.1f&deg;C) 103=0x%04X OK\n",
+                regConfig, regTemp, regTemp / 10.0, regMode);
 }
 
-void printStatus() {
-  Serial.println();
-  Serial.println("=== STATO ATTUALE ===");
+// === Helper per stato ===
+
+bool isOn()      { return (regConfig >> 14) & 1; }
+int  fanSpeed()  { return regConfig & 0x03; }
+bool isHeating() { return (regMode & 0x02) ? true : false; }
+float getTemp()  { return regTemp / 10.0; }
+
+const char* fanName() {
+  const char* names[] = {"auto", "min", "night", "max"};
+  return names[fanSpeed()];
+}
+
+String statusJSON() {
+  String json = "{";
+  json += "\"power\":\"" + String(isOn() ? "on" : "off") + "\",";
+  json += "\"temperature\":" + String(getTemp(), 1) + ",";
+  json += "\"fan\":\"" + String(fanName()) + "\",";
+  json += "\"fan_speed\":" + String(fanSpeed()) + ",";
+  json += "\"mode\":\"" + String(isHeating() ? "heat" : "cool") + "\",";
+  json += "\"reg101\":\"0x" + String(regConfig, HEX) + "\",";
+  json += "\"reg102\":\"0x" + String(regTemp, HEX) + "\",";
+  json += "\"reg103\":\"0x" + String(regMode, HEX) + "\"";
+  json += "}";
+  return json;
+}
+
+// === API REST Handlers ===
+
+void handleStatus() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", statusJSON());
+}
+
+void handleTemperature() {
+  if (!server.hasArg("value")) {
+    server.send(400, "application/json", "{\"error\":\"manca parametro value\"}");
+    return;
+  }
+  float temp = server.arg("value").toFloat();
+  if (temp < 5.0 || temp > 35.0) {
+    server.send(400, "application/json", "{\"error\":\"temperatura fuori range 5-35\"}");
+    return;
+  }
+  regTemp = (uint16_t)(temp * 10);
+  sendAllRegisters();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", statusJSON());
+  Serial.printf("API: Temperatura -> %.1f&deg;C\n", temp);
+}
+
+void handlePower() {
+  if (!server.hasArg("value")) {
+    server.send(400, "application/json", "{\"error\":\"manca parametro value (on/off)\"}");
+    return;
+  }
+  String val = server.arg("value");
+  val.toLowerCase();
+  if (val == "on") {
+    regConfig |= (1 << 14);
+  } else if (val == "off") {
+    regConfig &= ~(1 << 14);
+  } else {
+    server.send(400, "application/json", "{\"error\":\"value deve essere on o off\"}");
+    return;
+  }
+  sendAllRegisters();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", statusJSON());
+  Serial.printf("API: Power -> %s\n", val.c_str());
+}
+
+void handleFan() {
+  if (!server.hasArg("value")) {
+    server.send(400, "application/json", "{\"error\":\"manca parametro value (0-3)\"}");
+    return;
+  }
+  String val = server.arg("value");
+  int speed = -1;
+  if (val == "auto" || val == "0") speed = 0;
+  else if (val == "min" || val == "1") speed = 1;
+  else if (val == "night" || val == "2") speed = 2;
+  else if (val == "max" || val == "3") speed = 3;
+
+  if (speed < 0) {
+    server.send(400, "application/json", "{\"error\":\"value: 0/auto, 1/min, 2/night, 3/max\"}");
+    return;
+  }
+  regConfig = (regConfig & ~0x03) | (speed & 0x03);
+  sendAllRegisters();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", statusJSON());
+  Serial.printf("API: Fan -> %s\n", fanName());
+}
+
+void handleMode() {
+  if (!server.hasArg("value")) {
+    server.send(400, "application/json", "{\"error\":\"manca parametro value (heat/cool)\"}");
+    return;
+  }
+  String val = server.arg("value");
+  val.toLowerCase();
+  if (val == "heat") {
+    regMode |= 0x02;
+  } else if (val == "cool") {
+    regMode &= ~0x02;
+  } else {
+    server.send(400, "application/json", "{\"error\":\"value deve essere heat o cool\"}");
+    return;
+  }
+  sendAllRegisters();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", statusJSON());
+  Serial.printf("API: Mode -> %s\n", val.c_str());
+}
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>VISLA - Ventilconvettore</title>";
+  html += "<style>";
+  html += "body{font-family:sans-serif;max-width:400px;margin:20px auto;padding:0 15px;background:#1a1a2e;color:#eee}";
+  html += "h1{color:#e94560;font-size:1.4em;text-align:center}";
+  html += ".card{background:#16213e;border-radius:12px;padding:15px;margin:10px 0}";
+  html += ".row{display:flex;justify-content:space-between;align-items:center;padding:8px 0}";
+  html += ".label{color:#aaa;font-size:0.9em}";
+  html += ".value{font-size:1.2em;font-weight:bold}";
+  html += "button{background:#e94560;color:white;border:none;border-radius:8px;padding:12px 20px;";
+  html += "font-size:1em;cursor:pointer;margin:4px;flex:1}";
+  html += "button:active{background:#c73e54}";
+  html += "button.off{background:#444}";
+  html += "button.cool{background:#0f3460}";
+  html += ".temp-ctrl{display:flex;align-items:center;justify-content:center;gap:15px;padding:10px}";
+  html += ".temp-val{font-size:2.5em;font-weight:bold;color:#e94560;min-width:100px;text-align:center}";
+  html += ".temp-btn{width:50px;height:50px;border-radius:50%;font-size:1.5em;flex:none}";
+  html += ".btn-row{display:flex;gap:5px}";
+  html += "#status{text-align:center;color:#aaa;font-size:0.8em;padding:5px}";
+  html += "</style></head><body>";
+  html += "<h1>VISLA Ventilconvettore</h1>";
 
   // Temperatura
-  Serial.printf("  Temperatura setpoint: %.1f°C\n", regTemp / 10.0);
+  html += "<div class='card'>";
+  html += "<div class='row'><span class='label'>Temperatura setpoint</span></div>";
+  html += "<div class='temp-ctrl'>";
+  html += "<button class='temp-btn' onclick='setTemp(-0.5)'>-</button>";
+  html += "<span id='temp' class='temp-val'>--</span>";
+  html += "<button class='temp-btn' onclick='setTemp(+0.5)'>+</button>";
+  html += "</div></div>";
 
-  // On/Off
-  bool isOn = (regConfig >> 14) & 1;
-  Serial.printf("  Stato: %s\n", isOn ? "ACCESO" : "SPENTO");
+  // Power
+  html += "<div class='card'>";
+  html += "<div class='row'><span class='label'>Alimentazione</span></div>";
+  html += "<div class='btn-row'>";
+  html += "<button id='btn-on' onclick='setPower(\"on\")'>ACCESO</button>";
+  html += "<button id='btn-off' class='off' onclick='setPower(\"off\")'>SPENTO</button>";
+  html += "</div></div>";
 
-  // Ventilatore
-  uint8_t fanSpeed = regConfig & 0x03;
-  const char* fanNames[] = {"AUTO", "MIN", "NIGHT", "MAX"};
-  Serial.printf("  Ventilatore: %s (%d)\n", fanNames[fanSpeed], fanSpeed);
+  // Fan
+  html += "<div class='card'>";
+  html += "<div class='row'><span class='label'>Ventola</span></div>";
+  html += "<div class='btn-row'>";
+  html += "<button id='fan-0' onclick='setFan(0)'>AUTO</button>";
+  html += "<button id='fan-1' onclick='setFan(1)'>MIN</button>";
+  html += "<button id='fan-2' onclick='setFan(2)'>NIGHT</button>";
+  html += "<button id='fan-3' onclick='setFan(3)'>MAX</button>";
+  html += "</div></div>";
 
-  // Modo
-  Serial.printf("  Modo (reg 103): 0x%04X\n", regMode);
-  // 0x0082 potrebbe essere: byte basso bit 1 = riscaldamento?
-  // 0x0082 = 130 = 1000 0010 → bit 1 = 1 (caldo?), bit 7 = 1 (?)
-  bool heating = (regMode & 0x02) ? true : false;
-  Serial.printf("  Stagione: %s (ipotesi)\n", heating ? "CALDO" : "FREDDO");
+  // Mode
+  html += "<div class='card'>";
+  html += "<div class='row'><span class='label'>Stagione</span></div>";
+  html += "<div class='btn-row'>";
+  html += "<button id='btn-heat' onclick='setMode(\"heat\")'>CALDO</button>";
+  html += "<button id='btn-cool' class='cool' onclick='setMode(\"cool\")'>FREDDO</button>";
+  html += "</div></div>";
 
-  Serial.printf("\n  Registri raw: 101=0x%04X 102=0x%04X 103=0x%04X\n",
-                regConfig, regTemp, regMode);
-  Serial.println("=====================\n");
+  html += "<div id='status'>Caricamento...</div>";
+
+  // JavaScript
+  html += "<script>";
+  html += "var currentTemp=20.5;";
+  html += "function api(path,cb){fetch(path,{method:'POST'}).then(r=>r.json()).then(d=>{update(d);if(cb)cb(d)}).catch(e=>document.getElementById('status').innerText='Errore: '+e)}";
+  html += "function update(d){";
+  html += "currentTemp=d.temperature;";
+  html += "document.getElementById('temp').innerText=d.temperature.toFixed(1)+'\\u00B0C';";
+  html += "document.getElementById('btn-on').style.background=d.power=='on'?'#e94560':'#444';";
+  html += "document.getElementById('btn-off').style.background=d.power=='off'?'#e94560':'#444';";
+  html += "document.getElementById('btn-heat').style.background=d.mode=='heat'?'#e94560':'#444';";
+  html += "document.getElementById('btn-cool').style.background=d.mode=='cool'?'#0f3460':'#444';";
+  html += "for(var i=0;i<4;i++)document.getElementById('fan-'+i).style.background=d.fan_speed==i?'#e94560':'#444';";
+  html += "document.getElementById('status').innerText='Ultimo aggiornamento: '+new Date().toLocaleTimeString()}";
+  html += "function setTemp(delta){currentTemp+=delta;if(currentTemp<5)currentTemp=5;if(currentTemp>35)currentTemp=35;api('/api/temperature?value='+currentTemp.toFixed(1))}";
+  html += "function setPower(v){api('/api/power?value='+v)}";
+  html += "function setFan(v){api('/api/fan?value='+v)}";
+  html += "function setMode(v){api('/api/mode?value='+v)}";
+  html += "fetch('/api/status').then(r=>r.json()).then(d=>update(d));";
+  html += "setInterval(function(){fetch('/api/status').then(r=>r.json()).then(d=>update(d))},5000);";
+  html += "</script></body></html>";
+
+  server.send(200, "text/html", html);
 }
 
-void printHelp() {
-  Serial.println();
-  Serial.println("=== COMANDI DISPONIBILI ===");
-  Serial.println("  T22.5   → imposta temperatura 22.5°C");
-  Serial.println("  ON      → accendi ventilconvettore");
-  Serial.println("  OFF     → spegni ventilconvettore");
-  Serial.println("  FAN0    → ventilatore AUTO");
-  Serial.println("  FAN1    → ventilatore MIN");
-  Serial.println("  FAN2    → ventilatore NIGHT");
-  Serial.println("  FAN3    → ventilatore MAX");
-  Serial.println("  HEAT    → modo riscaldamento");
-  Serial.println("  COOL    → modo raffrescamento");
-  Serial.println("  STATUS  → mostra stato");
-  Serial.println("  SEND    → forza invio immediato");
-  Serial.println("  HELP    → mostra questo menu");
-  Serial.println("===========================\n");
+void handleNotFound() {
+  server.send(404, "application/json", "{\"error\":\"endpoint non trovato\"}");
 }
 
-// Processa comando ricevuto da Serial USB
+// === Serial command processing (invariato) ===
+
 void processCommand(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
-
   if (cmd.length() == 0) return;
-
   bool changed = false;
 
   if (cmd.startsWith("T")) {
-    // Imposta temperatura: T22.5
     float temp = cmd.substring(1).toFloat();
     if (temp >= 5.0 && temp <= 35.0) {
       regTemp = (uint16_t)(temp * 10);
-      Serial.printf(">>> Temperatura impostata: %.1f°C (reg 102 = 0x%04X)\n", temp, regTemp);
+      Serial.printf(">>> Temperatura: %.1f&deg;C\n", temp);
       changed = true;
     } else {
-      Serial.println("!!! Temperatura fuori range (5-35°C)");
+      Serial.println("!!! Range 5-35&deg;C");
     }
   }
-  else if (cmd == "ON") {
-    regConfig |= (1 << 14);  // Set bit 14
-    Serial.println(">>> Ventilconvettore ACCESO");
-    changed = true;
-  }
-  else if (cmd == "OFF") {
-    regConfig &= ~(1 << 14);  // Clear bit 14
-    Serial.println(">>> Ventilconvettore SPENTO");
-    changed = true;
-  }
+  else if (cmd == "ON") { regConfig |= (1 << 14); Serial.println(">>> ACCESO"); changed = true; }
+  else if (cmd == "OFF") { regConfig &= ~(1 << 14); Serial.println(">>> SPENTO"); changed = true; }
   else if (cmd.startsWith("FAN") && cmd.length() == 4) {
-    int speed = cmd.charAt(3) - '0';
-    if (speed >= 0 && speed <= 3) {
-      regConfig = (regConfig & ~0x03) | (speed & 0x03);
-      const char* names[] = {"AUTO", "MIN", "NIGHT", "MAX"};
-      Serial.printf(">>> Ventilatore: %s\n", names[speed]);
-      changed = true;
-    }
+    int s = cmd.charAt(3) - '0';
+    if (s >= 0 && s <= 3) { regConfig = (regConfig & ~0x03) | (s & 0x03); changed = true; }
   }
-  else if (cmd == "HEAT") {
-    regMode |= 0x02;   // Set bit 1
-    Serial.println(">>> Modo: RISCALDAMENTO");
-    changed = true;
-  }
-  else if (cmd == "COOL") {
-    regMode &= ~0x02;  // Clear bit 1
-    Serial.println(">>> Modo: RAFFRESCAMENTO");
-    changed = true;
-  }
+  else if (cmd == "HEAT") { regMode |= 0x02; changed = true; }
+  else if (cmd == "COOL") { regMode &= ~0x02; changed = true; }
   else if (cmd == "STATUS") {
-    printStatus();
+    Serial.println(statusJSON());
   }
-  else if (cmd == "SEND") {
-    sendAllRegisters();
-  }
-  else if (cmd == "HELP") {
-    printHelp();
-  }
-  else {
-    Serial.printf("??? Comando sconosciuto: %s\n", cmd.c_str());
-    Serial.println("    Scrivi HELP per lista comandi");
-  }
+  else if (cmd == "SEND") { sendAllRegisters(); }
+  else if (cmd == "IP") { Serial.println(WiFi.localIP()); }
 
   if (changed) {
-    Serial.println("    Invio immediato...");
     sendAllRegisters();
-    printStatus();
+    Serial.println(statusJSON());
   }
 }
 
-// === Ascolto bus (per debug) ===
+// === Ascolto bus RS485 ===
 #define MAX_FRAME_LEN 256
 char frameBuf[MAX_FRAME_LEN];
 int fPos = 0;
 bool fActive = false;
 
 void processRxByte(char c) {
-  if (c == ':') {
-    fPos = 0;
-    fActive = true;
-  } else if (c == '\r') {
-    // ignora
-  } else if (c == '\n' && fActive) {
+  if (c == ':') { fPos = 0; fActive = true; }
+  else if (c == '\r') {}
+  else if (c == '\n' && fActive) {
     frameBuf[fPos] = '\0';
-    if (fPos > 0) {
-      Serial.printf("[BUS RX] :%s\n", frameBuf);
-    }
-    fActive = false;
-    fPos = 0;
-  } else if (fActive && fPos < MAX_FRAME_LEN - 1) {
-    frameBuf[fPos++] = c;
+    if (fPos > 0) Serial.printf("[BUS] :%s\n", frameBuf);
+    fActive = false; fPos = 0;
   }
+  else if (fActive && fPos < MAX_FRAME_LEN - 1) { frameBuf[fPos++] = c; }
 }
 
 void initRS485() {
@@ -256,26 +365,58 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  Serial.println();
-  Serial.println("=============================================");
-  Serial.println("  VISLA Controller - Viessmann Energycal Slim W");
-  Serial.println("  T-CAN485 come sostituto del comando touch");
+  Serial.println("\n=============================================");
+  Serial.println("  VISLA Controller + WiFi API");
+  Serial.println("  Viessmann Energycal Slim W");
   Serial.println("=============================================\n");
 
+  // RS485
   initRS485();
 
-  printHelp();
-  printStatus();
+  // WiFi
+  Serial.printf("Connessione WiFi: %s ", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  // Primo invio immediato
-  Serial.println(">>> Primo invio registri...\n");
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\nWiFi connesso! IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("Apri nel browser: http://%s\n\n", WiFi.localIP().toString().c_str());
+
+    // Setup web server
+    server.on("/", handleRoot);
+    server.on("/api/status", HTTP_GET, handleStatus);
+    server.on("/api/temperature", HTTP_POST, handleTemperature);
+    server.on("/api/temperature", HTTP_GET, handleTemperature);  // anche GET per comodita'
+    server.on("/api/power", HTTP_POST, handlePower);
+    server.on("/api/power", HTTP_GET, handlePower);
+    server.on("/api/fan", HTTP_POST, handleFan);
+    server.on("/api/fan", HTTP_GET, handleFan);
+    server.on("/api/mode", HTTP_POST, handleMode);
+    server.on("/api/mode", HTTP_GET, handleMode);
+    server.onNotFound(handleNotFound);
+    server.begin();
+    Serial.println("Web server avviato sulla porta 80");
+  } else {
+    Serial.println("\nWiFi non connesso. Funziona solo via USB seriale.");
+    Serial.println("Modifica WIFI_SSID e WIFI_PASS nel codice.");
+  }
+
+  // Primo invio
   sendAllRegisters();
-
   lastSend = millis();
 }
 
 void loop() {
-  // Leggi comandi da Serial USB
+  // Web server
+  server.handleClient();
+
+  // Serial USB
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {
@@ -288,11 +429,10 @@ void loop() {
     }
   }
 
-  // Ascolta bus RS485 (debug)
+  // RS485 bus
   while (RS485.available()) {
     uint8_t raw = RS485.read();
-    char c = (char)(raw & 0x7F);
-    processRxByte(c);
+    processRxByte((char)(raw & 0x7F));
   }
 
   // Invio periodico

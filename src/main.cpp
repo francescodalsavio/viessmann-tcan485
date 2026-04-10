@@ -12,7 +12,13 @@
  *   POST /api/power?value=on|off
  *   POST /api/fan?value=0|1|2|3   (auto/min/night/max)
  *   POST /api/mode?value=heat|cool
+ *
+ * MODALITÀ SNIFFER:
+ *   Decommentare #define SNIFFER_MODE per attivare modalità ascolto passivo
+ *   Non invierà comandi, solo ascolterà il master originale
  */
+
+#define SNIFFER_MODE  // Decommentare per attivare modalità sniffer passivo
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -48,12 +54,52 @@ bool     heating   = true;    // true=caldo, false=freddo
 // === Web Server ===
 WebServer server(80);
 
+// === Sniffer Mode - Frame Capture Buffer ===
+#define SNIFFER_BUFFER_SIZE 100
+struct SniffedFrame {
+  uint32_t timestamp;
+  uint8_t addr;
+  uint8_t func;
+  uint16_t reg;
+  uint16_t val;
+  uint8_t lrc;
+  bool lrc_ok;
+};
+SniffedFrame sniffBuffer[SNIFFER_BUFFER_SIZE];
+int sniffIndex = 0;
+
 // === Utilità Modbus ASCII ===
 
 uint8_t calculateLRC(uint8_t *data, int len) {
   uint8_t lrc = 0;
   for (int i = 0; i < len; i++) lrc += data[i];
   return (uint8_t)(-(int8_t)lrc);
+}
+
+bool parseModbusFrame(const char* hexStr, SniffedFrame* frame) {
+  // Parsing frame ASCII: AAFFRRRRRRRRLLCC (6 bytes payload + lrc = 7 bytes total)
+  // Frame format: ADDR(2) FUNC(2) REG_HI(2) REG_LO(2) VAL_HI(2) VAL_LO(2) LRC(2) = 14 chars
+  int len = strlen(hexStr);
+  if (len < 14) return false;
+
+  uint8_t data[7];
+  for (int i = 0; i < 7 && i*2 < len; i++) {
+    char hex[3] = {hexStr[i*2], hexStr[i*2+1], 0};
+    data[i] = (uint8_t)strtol(hex, NULL, 16);
+  }
+
+  frame->timestamp = millis();
+  frame->addr = data[0];
+  frame->func = data[1];
+  frame->reg = (data[2] << 8) | data[3];
+  frame->val = (data[4] << 8) | data[5];
+  frame->lrc = data[6];
+
+  // Verify LRC
+  uint8_t lrc_calc = calculateLRC(data, 6);
+  frame->lrc_ok = (frame->lrc == lrc_calc);
+
+  return true;
 }
 
 void modbusWriteRegister(uint8_t addr, uint16_t reg, uint16_t value) {
@@ -81,6 +127,10 @@ void modbusWriteRegister(uint8_t addr, uint16_t reg, uint16_t value) {
 }
 
 void sendAllRegisters() {
+#ifdef SNIFFER_MODE
+  Serial.println(">>> [SNIFFER MODE] Invio disabilitato, ascolto passivo...");
+  return;
+#endif
   Serial.println(">>> Invio registri...");
   modbusWriteRegister(0, 101, regConfig);
   delay(200);
@@ -373,6 +423,9 @@ void handleTest() {
   html += "<button style='background:#0f3460' onclick='combo([101,0x2003],[103,0x008A])'>ACCENDI FREDDO</button>";
   html += "<button style='background:#e94560' onclick='spegni()'>SPEGNI (bit7)</button>";
   html += "<button style='background:#e94560' onclick='stopSend()'>STOP INVIO (silenzio)</button>";
+  html += "<button style='background:#9933ff' onclick='autoTest()'>▶ AUTO TEST (26 cmd)</button>";
+  html += "<button style='background:#ff6600' onclick='stopAutoTest()'>⏸ FERMA</button>";
+  html += "<span id='autoStatus' style='color:#aaa;margin-left:10px;font-size:0.9em'></span>";
 
   // Custom register input
   html += "<h2>REGISTRO CUSTOM</h2>";
@@ -382,27 +435,215 @@ void handleTest() {
   html += "<button onclick='sendCustom()'>INVIA</button>";
   html += "</div>";
 
+  // Documenta azioni
+  html += "<h2>DOCUMENTA AZIONE</h2>";
+  html += "<div style='display:flex;gap:5px;flex-wrap:wrap'>";
+  html += "<input id='noteInput' type='text' placeholder='es. Accende freddo a 17°C' style='background:#222;color:#fff;border:1px solid #555;border-radius:6px;padding:8px;flex:1;font-family:monospace'>";
+  html += "<button onclick='addNote()' style='background:#555'>NOTA</button>";
+  html += "</div>";
+  html += "<div id='notesList' style='background:#000;padding:10px;border-radius:6px;font-size:0.85em;max-height:150px;overflow-y:auto;margin-top:10px;color:#0f0'></div>";
+
   // Copy log
   html += "<h2>LOG</h2>";
   html += "<button style='background:#555' onclick='copyLog()'>COPIA LOG</button>";
+  html += "<button style='background:#555;margin-left:5px' onclick='downloadNotes()'>SCARICA NOTE</button>";
 
   // JavaScript
   html += "<script>";
   html += "var logEl=document.getElementById('log');";
+  html += "var notes=JSON.parse(localStorage.getItem('viessmannNotes')||'[]');";
+  html += "var autoRunning=false;";
+  html += "var autoIndex=0;";
+  html += "var autoTests=[[101,0x4003],[101,0x4001],[101,0x4081],[101,0x2003],[101,0x2083],[101,0x0003],[101,0x0000],[101,0x6003],[101,0x8003],[101,0xC003],[101,0xFFFF],[103,0x008A],[103,0x0082],[103,0x0080],[103,0x0088],[103,0x7FFF],[103,0xFFFF],[103,0x0000],[102,0x00CD],[102,0x0032],[102,0x0000],[102,0xFFFF]];";
   html += "function log(t){logEl.innerHTML=t+'<br>'+logEl.innerHTML}";
+  html += "function updateAutoStatus(){var el=document.getElementById('autoStatus');if(autoRunning){el.innerText='Test '+autoIndex+'/'+autoTests.length}else{el.innerText=''}}";
   html += "function r(reg,val){";
   html += "  log('Invio reg '+reg+' = 0x'+val.toString(16).toUpperCase()+'...');";
   html += "  fetch('/api/reg?reg='+reg+'&val='+val).then(r=>r.json()).then(d=>{";
   html += "    log('OK: 101='+d.reg101+' 102='+d.reg102+' 103='+d.reg103);";
   html += "  }).catch(e=>log('ERRORE: '+e))}";
+  html += "function autoTest(){if(autoRunning)return;autoRunning=true;autoIndex=0;autoLoop()}";
+  html += "function autoLoop(){if(!autoRunning||autoIndex>=autoTests.length){autoRunning=false;updateAutoStatus();log('AUTO TEST COMPLETO');return}";
+  html += "var t=autoTests[autoIndex];autoIndex++;updateAutoStatus();r(t[0],t[1]);setTimeout(autoLoop,2000)}";
+  html += "function stopAutoTest(){autoRunning=false;updateAutoStatus();log('AUTO TEST FERMATO')}";
   html += "function combo(){for(var i=0;i<arguments.length;i++){var a=arguments[i];r(a[0],a[1])}}";
   html += "function spegni(){r(101,(regConfig|0x0080)>>>0)}";
   html += "var regConfig=0x4003;";
   html += "function stopSend(){fetch('/api/power?value=off').then(r=>r.json()).then(d=>log('STOP invio')).catch(e=>log('ERR:'+e))}";
   html += "function sendCustom(){var reg=parseInt(document.getElementById('creg').value);var v=parseInt(document.getElementById('cval').value);if(isNaN(v)){log('Valore non valido');return}r(reg,v)}";
+  html += "function addNote(){var text=document.getElementById('noteInput').value.trim();if(!text)return;notes.push({time:new Date().toLocaleString(),text:text});localStorage.setItem('viessmannNotes',JSON.stringify(notes));document.getElementById('noteInput').value='';updateNotesList()}";
+  html += "function updateNotesList(){var el=document.getElementById('notesList');el.innerHTML=notes.map((n,i)=>'<div style=\"border-bottom:1px solid #333;padding:5px 0\">'+n.time+' - '+n.text+'</div>').join('')}";
+  html += "function downloadNotes(){var csv='Data,Ora,Nota\\n';notes.forEach(n=>{csv+=n.time+','+n.text+'\\n'});var blob=new Blob([csv],{type:'text/csv'});var url=URL.createObjectURL(blob);var a=document.createElement('a');a.href=url;a.download='viessmann_note.csv';document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url)}";
+  html += "updateNotesList();";
   html += "function copyLog(){navigator.clipboard.writeText(logEl.innerText).then(()=>alert('Log copiato!')).catch(()=>{var t=document.createElement('textarea');t.value=logEl.innerText;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Log copiato!')})}";
   html += "</script></body></html>";
 
+  server.send(200, "text/html", html);
+}
+
+void handleResetSniffer() {
+#ifdef SNIFFER_MODE
+  sniffIndex = 0;
+  memset(sniffBuffer, 0, sizeof(sniffBuffer));
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", "{\"status\":\"reset\",\"message\":\"Buffer svuotato\"}");
+  Serial.println(">>> Sniffer buffer reset!");
+#else
+  server.send(403, "text/plain", "SNIFFER MODE non abilitato");
+#endif
+}
+
+void handleSniffer() {
+#ifndef SNIFFER_MODE
+  server.send(403, "text/plain", "SNIFFER MODE non abilitato. Decommenta #define SNIFFER_MODE nel codice.");
+  return;
+#endif
+
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<meta http-equiv='refresh' content='1'>";
+  html += "<title>VISLA SNIFFER</title>";
+  html += "<style>";
+  html += "body{font-family:monospace;max-width:900px;margin:10px auto;padding:0 10px;background:#0a0a0a;color:#0f0}";
+  html += "h1{color:#0f0;text-align:center;border-bottom:2px solid #0f0;padding:10px}";
+  html += "table{width:100%;border-collapse:collapse;font-size:0.9em}";
+  html += "th{background:#1a1a1a;color:#0f0;padding:8px;text-align:left;border:1px solid #333}";
+  html += "td{padding:6px;border:1px solid #222}";
+  html += "tr:nth-child(even){background:#0a0a0a}";
+  html += "tr:nth-child(odd){background:#151515}";
+  html += ".ok{color:#0f0}.err{color:#f00}";
+  html += ".reg101{color:#ff6b6b}.reg102{color:#51cf66}.reg103{color:#4dabf7}";
+  html += ".info{background:#1a1a1a;padding:10px;border-radius:4px;margin:10px 0;color:#aaa}";
+  html += "</style></head><body>";
+
+  html += "<h1>VISLA SNIFFER - Ascolto Passivo Master</h1>";
+  html += "<div class='info'>Frame catturati: <strong>" + String(sniffIndex) + "</strong> | Buffer: <strong>" + String(min(sniffIndex, SNIFFER_BUFFER_SIZE)) + "</strong> / " + String(SNIFFER_BUFFER_SIZE) + "</div>";
+  html += "<div style='margin:10px 0;text-align:center'>";
+  html += "<button onclick='downloadCSV()' style='background:#27ae60;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-right:10px'>SCARICA CSV</button>";
+  html += "<button onclick='downloadJSON()' style='background:#3498db;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-right:10px'>SCARICA JSON</button>";
+  html += "<button onclick='resetData()' style='background:#e74c3c;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer'>RESET</button>";
+  html += "</div>";
+
+  if (sniffIndex == 0) {
+    html += "<div class='info' style='color:#f00'>⚠ Nessun frame catturato. Assicurati che il master sia connesso e trasmetta.</div>";
+  } else {
+    html += "<table>";
+    html += "<tr><th>#</th><th>Data/Ora</th><th>Tempo</th><th>Reg</th><th>Valore</th><th>Decodifica</th><th>Azione</th><th>Copia</th><th>LRC</th></tr>";
+
+    int start = max(0, sniffIndex - SNIFFER_BUFFER_SIZE);
+    int count = 0;
+    for (int i = start; i < sniffIndex && count < SNIFFER_BUFFER_SIZE; i++, count++) {
+      SniffedFrame& f = sniffBuffer[i % SNIFFER_BUFFER_SIZE];
+
+      // Calcola secondi e millisecondi
+      uint32_t totalMs = f.timestamp;
+      uint32_t secs = totalMs / 1000;
+      uint32_t ms = totalMs % 1000;
+      String timeStr = String(secs) + "." + String(ms);
+      String regClass = "";
+      String decode = "";
+
+      if (f.reg == 101) {
+        regClass = "reg101";
+        decode = "CFG: ";
+        if (f.val & (1 << 14)) decode += "COLD ";
+        if (f.val & (1 << 13)) decode += "HOT ";
+        if (f.val & (1 << 7)) decode += "STANDBY ";
+        int fan = f.val & 0x03;
+        const char* fans[] = {"AUTO", "MIN", "NIGHT", "MAX"};
+        decode += fans[fan];
+      } else if (f.reg == 102) {
+        regClass = "reg102";
+        decode = String(f.val / 10.0, 1) + "°C";
+      } else if (f.reg == 103) {
+        regClass = "reg103";
+        decode = "MODE";
+      }
+
+      String lrcMark = f.lrc_ok ? "<span class='ok'>OK</span>" : "<span class='err'>BAD</span>";
+
+      html += "<tr>";
+      html += "<td>" + String(i + 1) + "</td>";
+      html += "<td style='font-size:0.85em;font-family:monospace' class='dt' data-ms='" + String(totalMs) + "'>--:--:--</td>";
+      html += "<td style='font-size:0.85em;font-family:monospace' class='ts' data-ms='" + String(totalMs) + "'>-</td>";
+      html += "<td class='" + regClass + "'><strong>" + String(f.reg) + "</strong></td>";
+      html += "<td><strong>0x" + String(f.val, HEX) + "</strong></td>";
+      html += "<td style='font-size:0.9em'>" + decode + "</td>";
+      html += "<td><select style='padding:4px;font-size:0.85em'>";
+      html += "<option value=''>--</option>";
+      html += "<option value='Accendi CALDO'>Accendi CALDO</option>";
+      html += "<option value='Accendi FREDDO'>Accendi FREDDO</option>";
+      html += "<option value='Spegni'>Spegni</option>";
+      html += "<option value='Temp +'>Temp +</option>";
+      html += "<option value='Temp -'>Temp -</option>";
+      html += "<option value='Fan AUTO'>Fan AUTO</option>";
+      html += "<option value='Fan MIN'>Fan MIN</option>";
+      html += "<option value='Fan MAX'>Fan MAX</option>";
+      html += "</select></td>";
+      html += "<td><button onclick='copyCmd(" + String(f.reg) + ",0x" + String(f.val, HEX) + ")' style='background:#555;color:#0f0;padding:4px 8px;border:none;border-radius:4px;cursor:pointer;font-size:0.8em'>COPIA</button></td>";
+      html += "<td>" + lrcMark + "</td>";
+      html += "</tr>";
+    }
+    html += "</table>";
+  }
+
+  html += "<div class='info' style='margin-top:20px'>Monitoraggio in tempo reale | Ultimo aggiornamento: " + String(millis() / 1000) + "s</div>";
+
+  // JavaScript per export
+  html += "<script>";
+  html += "var pageLoadTime=Date.now();";
+  html += "function formatTime(ms){";
+  html += "  let totalSec=Math.floor(ms/1000);let h=Math.floor(totalSec/3600);let m=Math.floor((totalSec%3600)/60);let s=totalSec%60;";
+  html += "  return (h<10?'0':'')+h+':'+(m<10?'0':'')+m+':'+(s<10?'0':'')+s;";
+  html += "}";
+  html += "function getDateTime(ms){";
+  html += "  let rows=document.querySelectorAll('table tr');if(rows.length<2)return 'xx:xx:xx';";
+  html += "  let firstMs=parseInt(rows[1].querySelector('.dt').getAttribute('data-ms'));";
+  html += "  let offset=pageLoadTime-firstMs;let frameTime=offset+ms;";
+  html += "  let d=new Date(frameTime);";
+  html += "  let h=String(d.getHours()).padStart(2,'0');let m=String(d.getMinutes()).padStart(2,'0');let s=String(d.getSeconds()).padStart(2,'0');";
+  html += "  return h+':'+m+':'+s;";
+  html += "}";
+  html += "function updateTimestamps(){";
+  html += "  document.querySelectorAll('.ts').forEach(el=>{el.textContent=formatTime(parseInt(el.getAttribute('data-ms')))});";
+  html += "  document.querySelectorAll('.dt').forEach(el=>{el.textContent=getDateTime(parseInt(el.getAttribute('data-ms')))});";
+  html += "}";
+  html += "setInterval(updateTimestamps,1000);updateTimestamps();";
+  html += "function downloadCSV(){";
+  html += "  let csv='#,Tempo,Registro,Valore,Decodifica,Azione\\n';";
+  html += "  let rows=document.querySelectorAll('table tr');";
+  html += "  for(let i=1;i<rows.length;i++){";
+  html += "    let cells=rows[i].querySelectorAll('td');";
+  html += "    let actionSelect=rows[i].querySelector('select');";
+  html += "    let action=actionSelect?actionSelect.value:'';";
+  html += "    csv+=cells[0].textContent+','+cells[1].textContent+','+cells[2].textContent+','+cells[3].textContent+','+cells[4].textContent+','+action+'\\n';";
+  html += "  }";
+  html += "  downloadFile(csv,'sniffer_log.csv','text/csv');";
+  html += "}";
+  html += "function downloadJSON(){";
+  html += "  let data=[];";
+  html += "  let rows=document.querySelectorAll('table tr');";
+  html += "  for(let i=1;i<rows.length;i++){";
+  html += "    let cells=rows[i].querySelectorAll('td');";
+  html += "    let actionSelect=rows[i].querySelector('select');";
+  html += "    let action=actionSelect?actionSelect.value:'';";
+  html += "    data.push({num:cells[0].textContent,tempo:cells[1].textContent,registro:cells[2].textContent,valore:cells[3].textContent,decodifica:cells[4].textContent,azione:action});";
+  html += "  }";
+  html += "  downloadFile(JSON.stringify(data,null,2),'sniffer_log.json','application/json');";
+  html += "}";
+  html += "function resetData(){if(confirm('Reset tutti i dati? Non si puo annullare')){fetch('/api/reset-sniffer').then(r=>r.json()).then(d=>{alert('Buffer svuotato!');location.reload()}).catch(e=>alert('Errore: '+e))}}";
+  html += "function copyCmd(reg,val){let cmd='R'+reg+' '+val;navigator.clipboard.writeText(cmd).then(()=>{alert('Copiato: '+cmd)}).catch(()=>{var t=document.createElement('textarea');t.value=cmd;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Copiato: '+cmd)})}";
+  html += "function downloadFile(content,filename,type){";
+  html += "  let blob=new Blob([content],{type:type});";
+  html += "  let url=URL.createObjectURL(blob);";
+  html += "  let a=document.createElement('a');";
+  html += "  a.href=url;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);";
+  html += "}";
+  html += "</script>";
+  html += "</body></html>";
+
+  server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "text/html", html);
 }
 
@@ -488,7 +729,18 @@ void processRxByte(char c) {
   else if (c == '\r') {}
   else if (c == '\n' && fActive) {
     frameBuf[fPos] = '\0';
-    if (fPos > 0) Serial.printf("[BUS] :%s\n", frameBuf);
+    if (fPos > 0) {
+      Serial.printf("[BUS] :%s\n", frameBuf);
+
+#ifdef SNIFFER_MODE
+      // Cattura il frame nel buffer
+      SniffedFrame frame;
+      if (parseModbusFrame(frameBuf, &frame)) {
+        sniffBuffer[sniffIndex % SNIFFER_BUFFER_SIZE] = frame;
+        sniffIndex++;
+      }
+#endif
+    }
     fActive = false; fPos = 0;
   }
   else if (fActive && fPos < MAX_FRAME_LEN - 1) { frameBuf[fPos++] = c; }
@@ -551,9 +803,14 @@ void setup() {
     server.on("/api/mode", HTTP_GET, handleMode);
     server.on("/api/reg", HTTP_GET, handleReg);
     server.on("/test", handleTest);
+    server.on("/sniffer", handleSniffer);
+    server.on("/api/reset-sniffer", HTTP_GET, handleResetSniffer);
     server.onNotFound(handleNotFound);
     server.begin();
     Serial.println("Web server avviato sulla porta 80");
+#ifdef SNIFFER_MODE
+    Serial.println("!!! SNIFFER MODE ATTIVO - ascolto passivo, nessun invio !!!");
+#endif
   } else {
     Serial.println("\nWiFi non connesso. Funziona solo via USB seriale.");
     Serial.println("Modifica WIFI_SSID e WIFI_PASS nel codice.");

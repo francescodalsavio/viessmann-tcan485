@@ -579,10 +579,18 @@ void handleSniffer() {
   html += "<h1>VISLA SNIFFER - Ascolto Passivo Master</h1>";
   html += "<div class='info'>";
   html += "Modalità: <select style='background:#1a1a1a;color:#0f0;padding:5px;border:1px solid #333;cursor:pointer'>";
-  html += "<option selected>VISLA SNIFFER - Ascolto Passivo Master</option>";
-  html += "<option onclick='window.location=\"/\"'>VISLA CONTROLLO - Controllo Attivo</option>";
+  html += "<option selected>VISLA SNIFFER - Ascolto Passivo + Controllo</option>";
+  html += "<option onclick='window.location=\"/\"'>VISLA CONTROLLO - Pagina Controllo</option>";
   html += "</select>";
   html += "</div>";
+
+  // Controlli inline
+  html += "<div class='info' style='display:flex;gap:10px;flex-wrap:wrap;justify-content:center;align-items:center'>";
+  html += "Alimentazione: ";
+  html += "<button onclick='api(\"/api/power?value=on\")' style='background:#27ae60;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer'>ACCESO</button>";
+  html += "<button onclick='api(\"/api/power?value=off\")' style='background:#e74c3c;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer'>SPENTO</button>";
+  html += "</div>";
+
   html += "<div class='info'>Frame catturati: <strong>" + String(sniffIndex) + "</strong> | Buffer: <strong>" + String(min(sniffIndex, SNIFFER_BUFFER_SIZE)) + "</strong> / " + String(SNIFFER_BUFFER_SIZE) + "</div>";
   html += "<div style='margin:10px 0;text-align:center'>";
   html += "<button onclick='downloadCSV()' style='background:#27ae60;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-right:10px'>SCARICA CSV</button>";
@@ -698,6 +706,7 @@ void handleSniffer() {
   html += "  downloadFile(JSON.stringify(data,null,2),'sniffer_log.json','application/json');";
   html += "}";
   html += "function resetData(){if(confirm('Reset tutti i dati? Non si puo annullare')){fetch('/api/reset-sniffer').then(r=>r.json()).then(d=>{alert('Buffer svuotato!');location.reload()}).catch(e=>alert('Errore: '+e))}}";
+  html += "function api(path){fetch(path,{method:'POST'}).then(r=>r.json()).catch(e=>alert('Errore: '+e))}";
   html += "function copyCmd(reg,val){let cmd='R'+reg+' '+val;navigator.clipboard.writeText(cmd).then(()=>{alert('Copiato: '+cmd)}).catch(()=>{var t=document.createElement('textarea');t.value=cmd;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Copiato: '+cmd)})}";
   html += "function downloadFile(content,filename,type){";
   html += "  let blob=new Blob([content],{type:type});";

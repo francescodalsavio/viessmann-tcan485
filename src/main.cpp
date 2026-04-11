@@ -561,7 +561,6 @@ void handleSniffer() {
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta charset='UTF-8'>";
   html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-  html += "<meta http-equiv='refresh' content='1'>";
   html += "<title>VISLA SNIFFER</title>";
   html += "<style>";
   html += "body{font-family:monospace;max-width:900px;margin:10px auto;padding:0 10px;background:#0a0a0a;color:#0f0}";
@@ -588,7 +587,7 @@ void handleSniffer() {
   html += "<div class='info' style='display:grid;grid-template-columns:1fr 1fr;gap:15px'>";
   html += "<div>";
   html += "<strong>Reg 101 (Config):</strong><br>";
-  html += "<select onchange='api(\"/api/power?value=\"+this.value)' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  html += "<select id='sel101' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
   html += "<option value='on'>ACCESO (0x4003)</option>";
   html += "<option value='off'>SPENTO (0x4083)</option>";
   html += "</select>";
@@ -596,7 +595,7 @@ void handleSniffer() {
 
   html += "<div>";
   html += "<strong>Reg 102 (Temperatura):</strong><br>";
-  html += "<select onchange='api(\"/api/temperature?value=\"+this.value)' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  html += "<select id='sel102' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
   for (float t = 5.0; t <= 35.0; t += 0.5) {
     html += "<option>" + String(t, 1) + "°C</option>";
   }
@@ -605,7 +604,7 @@ void handleSniffer() {
 
   html += "<div>";
   html += "<strong>Reg 103 (Modalità):</strong><br>";
-  html += "<select onchange='api(\"/api/mode?value=\"+this.value)' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  html += "<select id='sel103' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
   html += "<option value='heat'>CALDO</option>";
   html += "<option value='cool'>FREDDO</option>";
   html += "</select>";
@@ -613,13 +612,19 @@ void handleSniffer() {
 
   html += "<div>";
   html += "<strong>Ventola:</strong><br>";
-  html += "<select onchange='api(\"/api/fan?value=\"+this.value)' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  html += "<select id='selfan' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
   html += "<option value='0'>AUTO</option>";
   html += "<option value='1'>MIN</option>";
   html += "<option value='2'>NIGHT</option>";
   html += "<option value='3'>MAX</option>";
   html += "</select>";
   html += "</div>";
+  html += "</div>";
+
+  // Bottoni
+  html += "<div style='text-align:center;margin:15px 0;gap:10px;display:flex;justify-content:center'>";
+  html += "<button onclick='sendCommands()' style='background:#27ae60;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-right:10px;font-weight:bold'>INVIA COMANDI</button>";
+  html += "<button onclick='location.reload()' style='background:#3498db;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer'>AGGIORNA</button>";
   html += "</div>";
 
   html += "<div class='info'>Frame catturati: <strong>" + String(sniffIndex) + "</strong> | Buffer: <strong>" + String(min(sniffIndex, SNIFFER_BUFFER_SIZE)) + "</strong> / " + String(SNIFFER_BUFFER_SIZE) + "</div>";
@@ -738,6 +743,17 @@ void handleSniffer() {
   html += "}";
   html += "function resetData(){if(confirm('Reset tutti i dati? Non si puo annullare')){fetch('/api/reset-sniffer').then(r=>r.json()).then(d=>{alert('Buffer svuotato!');location.reload()}).catch(e=>alert('Errore: '+e))}}";
   html += "function api(path){fetch(path,{method:'POST'}).then(r=>r.json()).catch(e=>alert('Errore: '+e))}";
+  html += "function sendCommands(){";
+  html += "  let val101=document.getElementById('sel101').value;";
+  html += "  let val102=document.getElementById('sel102').value;";
+  html += "  let val103=document.getElementById('sel103').value;";
+  html += "  let selfan=document.getElementById('selfan').value;";
+  html += "  if(val101!==''){api('/api/power?value='+val101);}";
+  html += "  if(val102!==''){let temp=parseFloat(val102);api('/api/temperature?value='+temp);}";
+  html += "  if(val103!==''){api('/api/mode?value='+val103);}";
+  html += "  if(selfan!==''){api('/api/fan?value='+selfan);}";
+  html += "  setTimeout(()=>location.reload(),1000);";
+  html += "}";
   html += "function copyCmd(reg,val){let cmd='R'+reg+' '+val;navigator.clipboard.writeText(cmd).then(()=>{alert('Copiato: '+cmd)}).catch(()=>{var t=document.createElement('textarea');t.value=cmd;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Copiato: '+cmd)})}";
   html += "function downloadFile(content,filename,type){";
   html += "  let blob=new Blob([content],{type:type});";

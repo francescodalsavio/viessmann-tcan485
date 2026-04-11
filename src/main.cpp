@@ -323,9 +323,6 @@ void handleRoot() {
   html += ".temp-btn{width:50px;height:50px;border-radius:50%;font-size:1.5em;flex:none}";
   html += ".btn-row{display:flex;gap:5px}";
   html += "#status{text-align:center;color:#aaa;font-size:0.8em;padding:5px}";
-  html += "#cmdlog{background:#16213e;border-radius:12px;padding:12px;margin:10px 0;max-height:200px;overflow-y:auto}";
-  html += ".cmd-item{padding:6px;border-bottom:1px solid #333;font-size:0.85em}";
-  html += ".cmd-time{color:#999;font-size:0.75em}";
   html += "</style></head><body>";
   html += "<h1>VISLA Ventilconvettore</h1>";
 
@@ -366,12 +363,6 @@ void handleRoot() {
 
   html += "<div id='status'>Caricamento...</div>";
 
-  // Registro comandi
-  html += "<div class='card'>";
-  html += "<div class='row'><span class='label'>Registr comandi inviati</span></div>";
-  html += "<div id='cmdlog'><span style='color:#666'>-</span></div>";
-  html += "</div>";
-
   // JavaScript
   html += "<script>";
   html += "var currentTemp=20.5;";
@@ -389,13 +380,8 @@ void handleRoot() {
   html += "function setPower(v){api('/api/power?value='+v)}";
   html += "function setFan(v){api('/api/fan?value='+v)}";
   html += "function setMode(v){api('/api/mode?value='+v)}";
-  html += "function updateLog(){fetch('/api/commands').then(r=>r.json()).then(cmds=>{";
-  html += "let html='';if(cmds.length===0){html='<span style=\"color:#666\">-</span>'}";
-  html += "else{cmds.reverse().slice(0,10).forEach(c=>{html+='<div class=\"cmd-item\"><span class=\"cmd-time'>'+c.time+'</span> '+c.desc+'</div>'})};";
-  html += "document.getElementById('cmdlog').innerHTML=html})}";
   html += "fetch('/api/status').then(r=>r.json()).then(d=>update(d));";
-  html += "updateLog();";
-  html += "setInterval(function(){fetch('/api/status').then(r=>r.json()).then(d=>update(d));updateLog()},2000);";
+  html += "setInterval(function(){fetch('/api/status').then(r=>r.json()).then(d=>update(d))},5000);";
   html += "</script></body></html>";
 
   server.send(200, "text/html", html);
@@ -591,6 +577,12 @@ void handleSniffer() {
   html += "</style></head><body>";
 
   html += "<h1>VISLA SNIFFER - Ascolto Passivo Master</h1>";
+  html += "<div class='info'>";
+  html += "Modalità: <select style='background:#1a1a1a;color:#0f0;padding:5px;border:1px solid #333;cursor:pointer'>";
+  html += "<option selected>VISLA SNIFFER - Ascolto Passivo Master</option>";
+  html += "<option onclick='window.location=\"/\"'>VISLA CONTROLLO - Controllo Attivo</option>";
+  html += "</select>";
+  html += "</div>";
   html += "<div class='info'>Frame catturati: <strong>" + String(sniffIndex) + "</strong> | Buffer: <strong>" + String(min(sniffIndex, SNIFFER_BUFFER_SIZE)) + "</strong> / " + String(SNIFFER_BUFFER_SIZE) + "</div>";
   html += "<div style='margin:10px 0;text-align:center'>";
   html += "<button onclick='downloadCSV()' style='background:#27ae60;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-right:10px'>SCARICA CSV</button>";

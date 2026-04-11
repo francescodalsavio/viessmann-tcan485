@@ -69,6 +69,21 @@ struct SniffedFrame {
 SniffedFrame sniffBuffer[SNIFFER_BUFFER_SIZE];
 int sniffIndex = 0;
 
+// === Command Log Buffer ===
+#define CMD_LOG_SIZE 20
+struct CommandLog {
+  uint32_t timestamp;
+  char desc[64];
+};
+CommandLog cmdLog[CMD_LOG_SIZE];
+int cmdIndex = 0;
+
+void logCommand(const char* desc) {
+  cmdLog[cmdIndex % CMD_LOG_SIZE].timestamp = millis();
+  snprintf(cmdLog[cmdIndex % CMD_LOG_SIZE].desc, sizeof(cmdLog[0].desc), "%s", desc);
+  cmdIndex++;
+}
+
 // === Utilità Modbus ASCII ===
 
 uint8_t calculateLRC(uint8_t *data, int len) {
@@ -196,6 +211,9 @@ void handleTemperature() {
     return;
   }
   regTemp = (uint16_t)(temp * 10);
+  char buf[64];
+  snprintf(buf, sizeof(buf), "Temperatura: %.1f°C", temp);
+  logCommand(buf);
   sendAllRegisters();
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", statusJSON());
@@ -214,10 +232,12 @@ void handlePower() {
     if (heating) regConfig |= (1 << 13);   // caldo = bit 13 (rosso)
     else         regConfig |= (1 << 14);   // freddo = bit 14 (blu)
     powerOn = true;
+    logCommand("Alimentazione: ACCESO");
     sendAllRegisters();
   } else if (val == "off") {
     regConfig |= (1 << 7);   // bit 7 = standby → spegnimento istantaneo
     powerOn = false;
+    logCommand("Alimentazione: SPENTO");
     sendAllRegisters();       // manda il comando di spegnimento
     Serial.println(">>> SPENTO (bit 7 standby)");
   } else {
@@ -246,6 +266,9 @@ void handleFan() {
     return;
   }
   regConfig = (regConfig & ~0x03) | (speed & 0x03);
+  char buf[64];
+  snprintf(buf, sizeof(buf), "Ventola: %s", fanName());
+  logCommand(buf);
   sendAllRegisters();
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", statusJSON());
@@ -263,10 +286,12 @@ void handleMode() {
     heating = true;
     regMode |= 0x02;
     if (powerOn) { regConfig &= ~(1 << 14); regConfig |= (1 << 13); }  // caldo = bit 13
+    logCommand("Stagione: CALDO");
   } else if (val == "cool") {
     heating = false;
     regMode &= ~0x02;
     if (powerOn) { regConfig &= ~(1 << 13); regConfig |= (1 << 14); }  // freddo = bit 14
+    logCommand("Stagione: FREDDO");
   } else {
     server.send(400, "application/json", "{\"error\":\"value deve essere heat o cool\"}");
     return;
@@ -298,6 +323,9 @@ void handleRoot() {
   html += ".temp-btn{width:50px;height:50px;border-radius:50%;font-size:1.5em;flex:none}";
   html += ".btn-row{display:flex;gap:5px}";
   html += "#status{text-align:center;color:#aaa;font-size:0.8em;padding:5px}";
+  html += "#cmdlog{background:#16213e;border-radius:12px;padding:12px;margin:10px 0;max-height:200px;overflow-y:auto}";
+  html += ".cmd-item{padding:6px;border-bottom:1px solid #333;font-size:0.85em}";
+  html += ".cmd-time{color:#999;font-size:0.75em}";
   html += "</style></head><body>";
   html += "<h1>VISLA Ventilconvettore</h1>";
 
@@ -338,6 +366,12 @@ void handleRoot() {
 
   html += "<div id='status'>Caricamento...</div>";
 
+  // Registro comandi
+  html += "<div class='card'>";
+  html += "<div class='row'><span class='label'>Registr comandi inviati</span></div>";
+  html += "<div id='cmdlog'><span style='color:#666'>-</span></div>";
+  html += "</div>";
+
   // JavaScript
   html += "<script>";
   html += "var currentTemp=20.5;";
@@ -355,11 +389,41 @@ void handleRoot() {
   html += "function setPower(v){api('/api/power?value='+v)}";
   html += "function setFan(v){api('/api/fan?value='+v)}";
   html += "function setMode(v){api('/api/mode?value='+v)}";
+  html += "function updateLog(){fetch('/api/commands').then(r=>r.json()).then(cmds=>{";
+  html += "let html='';if(cmds.length===0){html='<span style=\"color:#666\">-</span>'}";
+  html += "else{cmds.reverse().slice(0,10).forEach(c=>{html+='<div class=\"cmd-item\"><span class=\"cmd-time'>'+c.time+'</span> '+c.desc+'</div>'})};";
+  html += "document.getElementById('cmdlog').innerHTML=html})}";
   html += "fetch('/api/status').then(r=>r.json()).then(d=>update(d));";
-  html += "setInterval(function(){fetch('/api/status').then(r=>r.json()).then(d=>update(d))},5000);";
+  html += "updateLog();";
+  html += "setInterval(function(){fetch('/api/status').then(r=>r.json()).then(d=>update(d));updateLog()},2000);";
   html += "</script></body></html>";
 
   server.send(200, "text/html", html);
+}
+
+void handleCommands() {
+  String json = "[";
+  int start = max(0, cmdIndex - CMD_LOG_SIZE);
+  int count = cmdIndex;
+
+  for (int i = start; i < count; i++) {
+    CommandLog& c = cmdLog[i % CMD_LOG_SIZE];
+    if (i > start) json += ",";
+
+    uint32_t totalSec = c.timestamp / 1000;
+    uint32_t mm = totalSec / 60;
+    uint32_t ss = totalSec % 60;
+
+    json += "{\"time\":\"";
+    if (mm < 10) json += "0";
+    json += String(mm) + ":";
+    if (ss < 10) json += "0";
+    json += String(ss) + "\",\"desc\":\"" + String(c.desc) + "\"}";
+  }
+  json += "]";
+
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", json);
 }
 
 void handleReg() {
@@ -809,6 +873,7 @@ void setup() {
     server.on("/api/mode", HTTP_POST, handleMode);
     server.on("/api/mode", HTTP_GET, handleMode);
     server.on("/api/reg", HTTP_GET, handleReg);
+    server.on("/api/commands", HTTP_GET, handleCommands);
     server.on("/test", handleTest);
     server.on("/sniffer", handleSniffer);
     server.on("/api/reset-sniffer", HTTP_GET, handleResetSniffer);

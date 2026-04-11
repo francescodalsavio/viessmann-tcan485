@@ -741,14 +741,12 @@ void processRxByte(char c) {
     if (fPos > 0) {
       Serial.printf("[BUS] :%s\n", frameBuf);
 
-#ifdef SNIFFER_MODE
-      // Cattura il frame nel buffer
+      // Cattura il frame nel buffer (sempre, sia in controllo che sniffer)
       SniffedFrame frame;
       if (parseModbusFrame(frameBuf, &frame)) {
         sniffBuffer[sniffIndex % SNIFFER_BUFFER_SIZE] = frame;
         sniffIndex++;
       }
-#endif
     }
     fActive = false; fPos = 0;
   }

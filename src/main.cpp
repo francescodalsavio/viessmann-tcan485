@@ -738,11 +738,12 @@ void handleSniffer() {
   html += "  let temp=document.getElementById('seltemp').value;";
   html += "  if(preset===''){alert('Seleziona un preset!');return;}";
   html += "  let parts=preset.split('|');";
-  html += "  api('/api/power?value='+parts[0]);";
-  html += "  api('/api/mode?value='+parts[1]);";
-  html += "  api('/api/fan?value='+parts[2]);";
-  html += "  if(temp!==''){let t=parseFloat(temp);api('/api/temperature?value='+t);}";
-  html += "  setTimeout(()=>location.reload(),1200);";
+  html += "  let calls=[];";
+  html += "  calls.push(fetch('/api/power?value='+parts[0],{method:'POST'}).then(r=>r.json()));";
+  html += "  calls.push(fetch('/api/mode?value='+parts[1],{method:'POST'}).then(r=>r.json()));";
+  html += "  calls.push(fetch('/api/fan?value='+parts[2],{method:'POST'}).then(r=>r.json()));";
+  html += "  if(temp!==''){let t=parseFloat(temp);calls.push(fetch('/api/temperature?value='+t,{method:'POST'}).then(r=>r.json()));}";
+  html += "  Promise.all(calls).then(()=>{alert('Comandi inviati!');setTimeout(()=>location.reload(),500);}).catch(e=>alert('Errore: '+e));";
   html += "}";
   html += "function copyCmd(reg,val){let cmd='R'+reg+' '+val;navigator.clipboard.writeText(cmd).then(()=>{alert('Copiato: '+cmd)}).catch(()=>{var t=document.createElement('textarea');t.value=cmd;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Copiato: '+cmd)})}";
   html += "function downloadFile(content,filename,type){";

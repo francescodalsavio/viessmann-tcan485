@@ -38,7 +38,7 @@ const char* WIFI_PASS = "Fastweb10";
 
 #define RS485 Serial1
 #define BAUD_RATE 9600
-#define SEND_INTERVAL 10000  // 10 sec
+#define SEND_INTERVAL 65000  // 65 sec - replicates Master Viessmann timing
 
 // === Stato ventilconvettore ===
 // Reg 101: bit 14=FREDDO(blu), bit 13=CALDO(rosso), bit 7=STANDBY, bit 0-1=fan speed
@@ -64,6 +64,7 @@ struct SniffedFrame {
   uint16_t val;
   uint8_t lrc;
   bool lrc_ok;
+  char dateTime[16];  // "HH:MM:SS" salvato al momento della ricezione
 };
 SniffedFrame sniffBuffer[SNIFFER_BUFFER_SIZE];
 int sniffIndex = 0;
@@ -94,6 +95,14 @@ bool parseModbusFrame(const char* hexStr, SniffedFrame* frame) {
   frame->reg = (data[2] << 8) | data[3];
   frame->val = (data[4] << 8) | data[5];
   frame->lrc = data[6];
+
+  // Calcola Data/Ora immutabile al momento della ricezione (mm:ss:ms)
+  uint32_t totalMs = frame->timestamp;
+  uint32_t totalSec = totalMs / 1000;
+  uint32_t ms = totalMs % 1000;
+  uint32_t mm = totalSec / 60;
+  uint32_t ss = totalSec % 60;
+  snprintf(frame->dateTime, sizeof(frame->dateTime), "%02lu:%02lu.%03lu", mm, ss, ms);
 
   // Verify LRC
   uint8_t lrc_calc = calculateLRC(data, 6);
@@ -133,10 +142,10 @@ void sendAllRegisters() {
 #endif
   Serial.println(">>> Invio registri...");
   modbusWriteRegister(0, 101, regConfig);
-  delay(200);
+  delay(1160);  // 1.16 sec - matches Master Viessmann timing
   yield();
   modbusWriteRegister(0, 102, regTemp);
-  delay(200);
+  delay(1160);  // 1.16 sec - matches Master Viessmann timing
   yield();
   modbusWriteRegister(0, 103, regMode);
   Serial.printf("    101=0x%04X 102=0x%04X(%.1f&deg;C) 103=0x%04X OK\n",
@@ -529,18 +538,18 @@ void handleSniffer() {
     html += "<div class='info' style='color:#f00'>⚠ Nessun frame catturato. Assicurati che il master sia connesso e trasmetta.</div>";
   } else {
     html += "<table>";
-    html += "<tr><th>#</th><th>Data/Ora</th><th>Tempo</th><th>Reg</th><th>Valore</th><th>Decodifica</th><th>Azione</th><th>Copia</th><th>LRC</th></tr>";
+    html += "<tr><th>#</th><th>Data/Ora (mm:ss.ms)</th><th>Delta (s)</th><th>Reg</th><th>Valore</th><th>Decodifica</th><th>Azione</th><th>Copia</th><th>LRC</th></tr>";
 
     int start = max(0, sniffIndex - SNIFFER_BUFFER_SIZE);
     int count = 0;
+    uint32_t prevTimestamp = 0;
     for (int i = start; i < sniffIndex && count < SNIFFER_BUFFER_SIZE; i++, count++) {
       SniffedFrame& f = sniffBuffer[i % SNIFFER_BUFFER_SIZE];
 
-      // Calcola secondi e millisecondi
-      uint32_t totalMs = f.timestamp;
-      uint32_t secs = totalMs / 1000;
-      uint32_t ms = totalMs % 1000;
-      String timeStr = String(secs) + "." + String(ms);
+      // Calcola delay dal frame precedente
+      uint32_t deltaMs = (prevTimestamp == 0) ? 0 : (f.timestamp - prevTimestamp);
+      float deltaSec = deltaMs / 1000.0f;
+      prevTimestamp = f.timestamp;
       String regClass = "";
       String decode = "";
 
@@ -565,8 +574,8 @@ void handleSniffer() {
 
       html += "<tr>";
       html += "<td>" + String(i + 1) + "</td>";
-      html += "<td style='font-size:0.85em;font-family:monospace' class='dt' data-ms='" + String(totalMs) + "'>--:--:--</td>";
-      html += "<td style='font-size:0.85em;font-family:monospace' class='ts' data-ms='" + String(totalMs) + "'>-</td>";
+      html += "<td style='font-size:0.85em;font-family:monospace;color:#0f0'><strong>" + String(f.dateTime) + "</strong></td>";
+      html += "<td style='font-size:0.85em;font-family:monospace;color:#ff9900'><strong>" + String(deltaSec, 2) + "s</strong></td>";
       html += "<td class='" + regClass + "'><strong>" + String(f.reg) + "</strong></td>";
       html += "<td><strong>0x" + String(f.val, HEX) + "</strong></td>";
       html += "<td style='font-size:0.9em'>" + decode + "</td>";

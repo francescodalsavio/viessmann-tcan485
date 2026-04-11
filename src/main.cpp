@@ -584,11 +584,42 @@ void handleSniffer() {
   html += "</select>";
   html += "</div>";
 
-  // Controlli inline
-  html += "<div class='info' style='display:flex;gap:10px;flex-wrap:wrap;justify-content:center;align-items:center'>";
-  html += "Alimentazione: ";
-  html += "<button onclick='api(\"/api/power?value=on\")' style='background:#27ae60;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer'>ACCESO</button>";
-  html += "<button onclick='api(\"/api/power?value=off\")' style='background:#e74c3c;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer'>SPENTO</button>";
+  // Controlli registro per registro
+  html += "<div class='info' style='display:grid;grid-template-columns:1fr 1fr;gap:15px'>";
+  html += "<div>";
+  html += "<strong>Reg 101 (Config):</strong><br>";
+  html += "<select onchange='api(\"/api/power?value=\"+this.value)' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  html += "<option value='on'>ACCESO (0x4003)</option>";
+  html += "<option value='off'>SPENTO (0x4083)</option>";
+  html += "</select>";
+  html += "</div>";
+
+  html += "<div>";
+  html += "<strong>Reg 102 (Temperatura):</strong><br>";
+  html += "<select onchange='api(\"/api/temperature?value=\"+this.value)' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  for (float t = 5.0; t <= 35.0; t += 0.5) {
+    html += "<option>" + String(t, 1) + "°C</option>";
+  }
+  html += "</select>";
+  html += "</div>";
+
+  html += "<div>";
+  html += "<strong>Reg 103 (Modalità):</strong><br>";
+  html += "<select onchange='api(\"/api/mode?value=\"+this.value)' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  html += "<option value='heat'>CALDO</option>";
+  html += "<option value='cool'>FREDDO</option>";
+  html += "</select>";
+  html += "</div>";
+
+  html += "<div>";
+  html += "<strong>Ventola:</strong><br>";
+  html += "<select onchange='api(\"/api/fan?value=\"+this.value)' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  html += "<option value='0'>AUTO</option>";
+  html += "<option value='1'>MIN</option>";
+  html += "<option value='2'>NIGHT</option>";
+  html += "<option value='3'>MAX</option>";
+  html += "</select>";
+  html += "</div>";
   html += "</div>";
 
   html += "<div class='info'>Frame catturati: <strong>" + String(sniffIndex) + "</strong> | Buffer: <strong>" + String(min(sniffIndex, SNIFFER_BUFFER_SIZE)) + "</strong> / " + String(SNIFFER_BUFFER_SIZE) + "</div>";

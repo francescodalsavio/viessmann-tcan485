@@ -583,47 +583,37 @@ void handleSniffer() {
   html += "</select>";
   html += "</div>";
 
-  // Controlli registro per registro
-  html += "<div class='info' style='display:grid;grid-template-columns:1fr 1fr;gap:15px'>";
-  html += "<div>";
-  html += "<strong>Reg 101 (Config):</strong><br>";
-  html += "<select id='sel101' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
-  html += "<option value='on'>ACCESO (0x4003)</option>";
-  html += "<option value='off'>SPENTO (0x4083)</option>";
+  // Preset combinati
+  html += "<div class='info'>";
+  html += "<strong>Preset Combinati:</strong><br>";
+  html += "<select id='preset' style='background:#1a1a1a;color:#0f0;padding:10px;border:1px solid #333;width:100%;cursor:pointer;margin-top:8px;font-weight:bold'>";
+  html += "<option value=''>-- Seleziona preset --</option>";
+  html += "<option value='on|heat|3'>✓ ACCESO CALDO FAN MAX</option>";
+  html += "<option value='on|heat|2'>✓ ACCESO CALDO FAN NIGHT</option>";
+  html += "<option value='on|heat|1'>✓ ACCESO CALDO FAN MIN</option>";
+  html += "<option value='on|heat|0'>✓ ACCESO CALDO FAN AUTO</option>";
+  html += "<option value='on|cool|3'>✓ ACCESO FREDDO FAN MAX</option>";
+  html += "<option value='on|cool|2'>✓ ACCESO FREDDO FAN NIGHT</option>";
+  html += "<option value='on|cool|1'>✓ ACCESO FREDDO FAN MIN</option>";
+  html += "<option value='on|cool|0'>✓ ACCESO FREDDO FAN AUTO</option>";
+  html += "<option value='off|heat|0'>✗ SPENTO CALDO</option>";
+  html += "<option value='off|cool|0'>✗ SPENTO FREDDO</option>";
   html += "</select>";
   html += "</div>";
 
-  html += "<div>";
-  html += "<strong>Reg 102 (Temperatura):</strong><br>";
-  html += "<select id='sel102' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
+  // Controlli manuali
+  html += "<div class='info'>";
+  html += "<strong>Regola Temperatura:</strong><br>";
+  html += "<select id='seltemp' style='background:#1a1a1a;color:#0f0;padding:10px;border:1px solid #333;width:100%;cursor:pointer;margin-top:8px'>";
   for (float t = 5.0; t <= 35.0; t += 0.5) {
     html += "<option>" + String(t, 1) + "°C</option>";
   }
   html += "</select>";
   html += "</div>";
 
-  html += "<div>";
-  html += "<strong>Reg 103 (Modalità):</strong><br>";
-  html += "<select id='sel103' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
-  html += "<option value='heat'>CALDO</option>";
-  html += "<option value='cool'>FREDDO</option>";
-  html += "</select>";
-  html += "</div>";
-
-  html += "<div>";
-  html += "<strong>Ventola:</strong><br>";
-  html += "<select id='selfan' style='background:#1a1a1a;color:#0f0;padding:8px;border:1px solid #333;width:100%;cursor:pointer;margin-top:5px'>";
-  html += "<option value='0'>AUTO</option>";
-  html += "<option value='1'>MIN</option>";
-  html += "<option value='2'>NIGHT</option>";
-  html += "<option value='3'>MAX</option>";
-  html += "</select>";
-  html += "</div>";
-  html += "</div>";
-
   // Bottoni
   html += "<div style='text-align:center;margin:15px 0;gap:10px;display:flex;justify-content:center'>";
-  html += "<button onclick='sendCommands()' style='background:#27ae60;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-right:10px;font-weight:bold'>INVIA COMANDI</button>";
+  html += "<button onclick='sendCommands()' style='background:#27ae60;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-right:10px;font-weight:bold'>INVIA</button>";
   html += "<button onclick='location.reload()' style='background:#3498db;color:white;padding:10px 20px;border:none;border-radius:6px;cursor:pointer'>AGGIORNA</button>";
   html += "</div>";
 
@@ -744,15 +734,15 @@ void handleSniffer() {
   html += "function resetData(){if(confirm('Reset tutti i dati? Non si puo annullare')){fetch('/api/reset-sniffer').then(r=>r.json()).then(d=>{alert('Buffer svuotato!');location.reload()}).catch(e=>alert('Errore: '+e))}}";
   html += "function api(path){fetch(path,{method:'POST'}).then(r=>r.json()).catch(e=>alert('Errore: '+e))}";
   html += "function sendCommands(){";
-  html += "  let val101=document.getElementById('sel101').value;";
-  html += "  let val102=document.getElementById('sel102').value;";
-  html += "  let val103=document.getElementById('sel103').value;";
-  html += "  let selfan=document.getElementById('selfan').value;";
-  html += "  if(val101!==''){api('/api/power?value='+val101);}";
-  html += "  if(val102!==''){let temp=parseFloat(val102);api('/api/temperature?value='+temp);}";
-  html += "  if(val103!==''){api('/api/mode?value='+val103);}";
-  html += "  if(selfan!==''){api('/api/fan?value='+selfan);}";
-  html += "  setTimeout(()=>location.reload(),1000);";
+  html += "  let preset=document.getElementById('preset').value;";
+  html += "  let temp=document.getElementById('seltemp').value;";
+  html += "  if(preset===''){alert('Seleziona un preset!');return;}";
+  html += "  let parts=preset.split('|');";
+  html += "  api('/api/power?value='+parts[0]);";
+  html += "  api('/api/mode?value='+parts[1]);";
+  html += "  api('/api/fan?value='+parts[2]);";
+  html += "  if(temp!==''){let t=parseFloat(temp);api('/api/temperature?value='+t);}";
+  html += "  setTimeout(()=>location.reload(),1200);";
   html += "}";
   html += "function copyCmd(reg,val){let cmd='R'+reg+' '+val;navigator.clipboard.writeText(cmd).then(()=>{alert('Copiato: '+cmd)}).catch(()=>{var t=document.createElement('textarea');t.value=cmd;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Copiato: '+cmd)})}";
   html += "function downloadFile(content,filename,type){";

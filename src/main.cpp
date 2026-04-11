@@ -18,7 +18,7 @@
  *   Non invierà comandi, solo ascolterà il master originale
  */
 
-// #define SNIFFER_MODE  // Decommentare per attivare modalità sniffer passivo
+#define SNIFFER_MODE  // Modalità sniffer + controllo attivo
 
 #include <Arduino.h>
 #include <WiFi.h>

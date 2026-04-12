@@ -18,7 +18,7 @@
  *   Non invierà comandi, solo ascolterà il master originale
  */
 
-#define SNIFFER_MODE  // Modalità sniffer + controllo attivo
+// #define SNIFFER_MODE  // ← DISABILITATO: Uso il controllo attivo invece di sniffare
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -37,19 +37,21 @@ const char* WIFI_PASS = "Fastweb10";
 #define BOOST_ENABLE_PIN   16
 
 #define RS485 Serial1
-#define BAUD_RATE 9600
 #define SEND_INTERVAL 65000  // 65 sec - replicates Master Viessmann timing
+
+// Baud rate variabile - può essere cambiato via API
+uint32_t currentBaudRate = 9600;
 
 // === Stato ventilconvettore ===
 // Reg 101: bit 14=FREDDO(blu), bit 13=CALDO(rosso), bit 7=STANDBY, bit 0-1=fan speed
 // ACCESO CALDO:  bit 13 set, bit 7 clear (es. 0x2003)
 // ACCESO FREDDO: bit 14 set, bit 7 clear (es. 0x4003)
 // SPENTO:        bit 7 set (es. 0x2083 = caldo+standby, 0x4083 = freddo+standby)
-uint16_t regConfig = 0x2003;  // caldo acceso (bit13), ventola MAX
-uint16_t regTemp   = 0x00CD;  // 20.5°C (× 10)
-uint16_t regMode   = 0x008A;  // modo stagionale
-bool     powerOn   = true;
-bool     heating   = true;    // true=caldo, false=freddo
+uint16_t regConfig = 0x4083;  // FREDDO SPENTO ventola MAX (default)
+uint16_t regTemp   = 0x00A0;  // 16.0°C (× 10 = 160 = 0xA0)
+uint16_t regMode   = 0x00AF;  // modo stagionale (confermato dal Master Viessmann)
+bool     powerOn   = false;   // SPENTO di default
+bool     heating   = false;   // FREDDO di default
 
 // === Web Server ===
 WebServer server(80);
@@ -64,7 +66,8 @@ struct SniffedFrame {
   uint16_t val;
   uint8_t lrc;
   bool lrc_ok;
-  char dateTime[16];  // "HH:MM:SS" salvato al momento della ricezione
+  char dateTime[16];  // "HH:MM:SS"
+  char rawHex[64];    // Frame completo in hex (":AAFFRRRRRRRRLLCC")
 };
 SniffedFrame sniffBuffer[SNIFFER_BUFFER_SIZE];
 int sniffIndex = 0;
@@ -73,14 +76,29 @@ int sniffIndex = 0;
 #define CMD_LOG_SIZE 20
 struct CommandLog {
   uint32_t timestamp;
+  uint16_t reg;      // REG 101, 102, 103
+  uint16_t val;      // valore hex inviato
   char desc[64];
 };
 CommandLog cmdLog[CMD_LOG_SIZE];
 int cmdIndex = 0;
+uint32_t lastCmdTime = 0;
 
 void logCommand(const char* desc) {
   cmdLog[cmdIndex % CMD_LOG_SIZE].timestamp = millis();
+  cmdLog[cmdIndex % CMD_LOG_SIZE].reg = 0;
+  cmdLog[cmdIndex % CMD_LOG_SIZE].val = 0;
   snprintf(cmdLog[cmdIndex % CMD_LOG_SIZE].desc, sizeof(cmdLog[0].desc), "%s", desc);
+  lastCmdTime = cmdLog[cmdIndex % CMD_LOG_SIZE].timestamp;
+  cmdIndex++;
+}
+
+void logCommandReg(uint16_t reg, uint16_t val) {
+  cmdLog[cmdIndex % CMD_LOG_SIZE].timestamp = millis();
+  cmdLog[cmdIndex % CMD_LOG_SIZE].reg = reg;
+  cmdLog[cmdIndex % CMD_LOG_SIZE].val = val;
+  snprintf(cmdLog[cmdIndex % CMD_LOG_SIZE].desc, sizeof(cmdLog[0].desc), "REG %d = 0x%04X", reg, val);
+  lastCmdTime = cmdLog[cmdIndex % CMD_LOG_SIZE].timestamp;
   cmdIndex++;
 }
 
@@ -145,9 +163,20 @@ void modbusWriteRegister(uint8_t addr, uint16_t reg, uint16_t value) {
   txBuf[pos++] = '\r';
   txBuf[pos++] = '\n';
 
+  // Abilita trasmissione RS485 (RE pin LOW)
+  digitalWrite(RS485_RE_PIN, LOW);
+  delay(50);  // Aumentato per stabilizzazione transceiver
+
   while (RS485.available()) RS485.read();
   RS485.write((uint8_t*)txBuf, pos);
   RS485.flush();
+
+  // Disabilita trasmissione, ritorna a ricezione (RE pin HIGH)
+  delay(100);  // Aumentato per assicurare TX completato e ritorno a RX
+  digitalWrite(RS485_RE_PIN, HIGH);
+
+  // Log del comando inviato
+  logCommandReg(reg, value);
 }
 
 void sendAllRegisters() {
@@ -155,15 +184,20 @@ void sendAllRegisters() {
   Serial.println(">>> [SNIFFER MODE] Invio disabilitato, ascolto passivo...");
   return;
 #endif
-  Serial.println(">>> Invio registri...");
+  Serial.println(">>> Invio registri a BROADCAST (0x00 - tutti i ventilconvettori)...");
+
+  // Invia a broadcast (0x00) per raggiungere TUTTI i ventilconvettori contemporaneamente
   modbusWriteRegister(0, 101, regConfig);
   delay(1160);  // 1.16 sec - matches Master Viessmann timing
   yield();
+
   modbusWriteRegister(0, 102, regTemp);
   delay(1160);  // 1.16 sec - matches Master Viessmann timing
   yield();
+
   modbusWriteRegister(0, 103, regMode);
-  Serial.printf("    101=0x%04X 102=0x%04X(%.1f&deg;C) 103=0x%04X OK\n",
+
+  Serial.printf("    101=0x%04X 102=0x%04X(%.1f°C) 103=0x%04X → Broadcast OK\n",
                 regConfig, regTemp, regTemp / 10.0, regMode);
 }
 
@@ -302,6 +336,20 @@ void handleMode() {
   Serial.printf("API: Mode -> %s\n", val.c_str());
 }
 
+void handleBaudrate() {
+  if (!server.hasArg("value")) {
+    String json = "{\"baudrate\":" + String(currentBaudRate) + "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  // Per ora, non cambiamo il baud rate al volo (causa crash)
+  // Ritorna il baud rate attuale
+  String json = "{\"baudrate\":" + String(currentBaudRate) + ",\"status\":\"Cambia manualmente in src/main.cpp\"}";
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", json);
+}
+
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
@@ -323,6 +371,13 @@ void handleRoot() {
   html += ".temp-btn{width:50px;height:50px;border-radius:50%;font-size:1.5em;flex:none}";
   html += ".btn-row{display:flex;gap:5px}";
   html += "#status{text-align:center;color:#aaa;font-size:0.8em;padding:5px}";
+  html += ".cmd-table{width:100%;border-collapse:collapse;margin-top:5px}";
+  html += ".cmd-table th{padding:8px;border-bottom:2px solid #555;color:#aaa;font-size:0.8em;text-align:left;font-weight:normal}";
+  html += ".cmd-table td{padding:8px;border-bottom:1px solid #333;color:#ccc;font-size:0.85em}";
+  html += ".cmd-table td:first-child{color:#e94560;font-weight:bold;width:45px}";
+  html += ".cmd-table td:nth-child(2){color:#00ff00;font-family:monospace;width:50px}";
+  html += ".cmd-table td:nth-child(3){color:#ffff00;font-family:monospace;width:60px}";
+  html += ".cmd-table td:nth-child(4){color:#aaa;font-size:0.8em;width:60px}";
   html += "</style></head><body>";
   html += "<h1>VISLA Ventilconvettore</h1>";
 
@@ -361,7 +416,23 @@ void handleRoot() {
   html += "<button id='btn-cool' class='cool' onclick='setMode(\"cool\")'>FREDDO</button>";
   html += "</div></div>";
 
+  // Baud Rate
+  html += "<div class='card'>";
+  html += "<div class='row'><span class='label'>Baud Rate RS485</span><span id='br-val' class='value'>9600</span></div>";
+  html += "<div class='btn-row'>";
+  html += "<button id='br-9600' onclick='setBaudrate(9600)'>9600</button>";
+  html += "<button id='br-19200' onclick='setBaudrate(19200)'>19200</button>";
+  html += "<button id='br-38400' onclick='setBaudrate(38400)'>38400</button>";
+  html += "</div></div>";
+
   html += "<div id='status'>Caricamento...</div>";
+
+  html += "<div class='card'><h3 style='margin-top:0;color:#aaa;font-size:0.9em'>COMANDI INVIATI</h3>";
+  html += "<table class='cmd-table'>";
+  html += "<thead><tr><th>Time</th><th>REG</th><th>Hex</th><th>Delay</th></tr></thead>";
+  html += "<tbody id='cmd-list'>";
+  html += "<tr><td colspan='4' style='text-align:center;color:#666'>Caricamento...</td></tr>";
+  html += "</tbody></table></div>";
 
   // JavaScript
   html += "<script>";
@@ -376,12 +447,25 @@ void handleRoot() {
   html += "document.getElementById('btn-cool').style.background=d.mode=='cool'?'#0f3460':'#444';";
   html += "for(var i=0;i<4;i++)document.getElementById('fan-'+i).style.background=d.fan_speed==i?'#e94560':'#444';";
   html += "document.getElementById('status').innerText='Ultimo aggiornamento: '+new Date().toLocaleTimeString()}";
+  html += "function updateCmds(){fetch('/api/commands').then(r=>r.json()).then(cmds=>{var h='';if(!cmds||cmds.length==0){h='<tr><td colspan=4 style=\"text-align:center;color:#666\">Nessun comando</td></tr>'}else{cmds.slice(-10).reverse().forEach(c=>{var ds=c.delay>1000?Math.round(c.delay/100)/10+'s':c.delay+'ms';h+='<tr><td>'+c.time+'</td><td>'+(c.reg>0?c.reg:'-')+'</td><td>'+c.val+'</td><td>'+ds+'</td></tr>'})}document.getElementById('cmd-list').innerHTML=h}).catch(e=>console.log('Cmd error:'+e))}";
   html += "function setTemp(delta){currentTemp+=delta;if(currentTemp<5)currentTemp=5;if(currentTemp>35)currentTemp=35;api('/api/temperature?value='+currentTemp.toFixed(1))}";
   html += "function setPower(v){api('/api/power?value='+v)}";
   html += "function setFan(v){api('/api/fan?value='+v)}";
   html += "function setMode(v){api('/api/mode?value='+v)}";
-  html += "fetch('/api/status').then(r=>r.json()).then(d=>update(d));";
-  html += "setInterval(function(){fetch('/api/status').then(r=>r.json()).then(d=>update(d))},5000);";
+  html += "function setBaudrate(br){";
+  html += "fetch('/api/baudrate?value='+br,{method:'POST'})";
+  html += ".then(r=>r.json())";
+  html += ".then(d=>{";
+  html += "document.getElementById('br-val').innerText=d.baudrate;";
+  html += "document.getElementById('br-9600').style.background=d.baudrate==9600?'#e94560':'#444';";
+  html += "document.getElementById('br-19200').style.background=d.baudrate==19200?'#e94560':'#444';";
+  html += "document.getElementById('br-38400').style.background=d.baudrate==38400?'#e94560':'#444';";
+  html += "document.getElementById('status').innerText='Baud rate: '+d.baudrate";
+  html += "})";
+  html += ".catch(e=>document.getElementById('status').innerText='Errore baud rate: '+e)}";
+  html += "function updateBaudrate(){fetch('/api/baudrate?value='+document.getElementById('br-val').innerText).then(r=>r.json()).then(d=>{document.getElementById('br-val').innerText=d.baudrate;document.getElementById('br-9600').style.background=d.baudrate==9600?'#e94560':'#444';document.getElementById('br-19200').style.background=d.baudrate==19200?'#e94560':'#444';document.getElementById('br-38400').style.background=d.baudrate==38400?'#e94560':'#444'})}";
+  html += "fetch('/api/status').then(r=>r.json()).then(d=>update(d));updateCmds();";
+  html += "setInterval(function(){fetch('/api/status').then(r=>r.json()).then(d=>update(d));updateCmds()},5000);";
   html += "</script></body></html>";
 
   server.send(200, "text/html", html);
@@ -400,11 +484,20 @@ void handleCommands() {
     uint32_t mm = totalSec / 60;
     uint32_t ss = totalSec % 60;
 
+    // Calcola delay dal comando precedente
+    uint32_t delay_ms = 0;
+    if (i > start) {
+      CommandLog& prev = cmdLog[(i-1) % CMD_LOG_SIZE];
+      delay_ms = c.timestamp - prev.timestamp;
+    }
+
     json += "{\"time\":\"";
     if (mm < 10) json += "0";
     json += String(mm) + ":";
     if (ss < 10) json += "0";
-    json += String(ss) + "\",\"desc\":\"" + String(c.desc) + "\"}";
+    json += String(ss) + "\",\"reg\":";
+    json += String(c.reg) + ",\"val\":\"0x" + String(c.val, HEX) + "\",\"delay\":";
+    json += String(delay_ms) + ",\"desc\":\"" + String(c.desc) + "\"}";
   }
   json += "]";
 
@@ -628,7 +721,7 @@ void handleSniffer() {
     html += "<div class='info' style='color:#f00'>⚠ Nessun frame catturato. Assicurati che il master sia connesso e trasmetta.</div>";
   } else {
     html += "<table>";
-    html += "<tr><th>#</th><th>Data/Ora (mm:ss.ms)</th><th>Delta (s)</th><th>Reg</th><th>Valore</th><th>Decodifica</th><th>Azione</th><th>Copia</th><th>LRC</th></tr>";
+    html += "<tr><th>#</th><th>Data/Ora (mm:ss.ms)</th><th>Delta (s)</th><th>Addr</th><th>Func</th><th>Reg</th><th>Valore</th><th>Decodifica</th><th>Frame Completo</th><th>LRC</th></tr>";
 
     int start = max(0, sniffIndex - SNIFFER_BUFFER_SIZE);
     int count = 0;
@@ -666,21 +759,12 @@ void handleSniffer() {
       html += "<td>" + String(i + 1) + "</td>";
       html += "<td style='font-size:0.85em;font-family:monospace;color:#0f0'><strong>" + String(f.dateTime) + "</strong></td>";
       html += "<td style='font-size:0.85em;font-family:monospace;color:#ff9900'><strong>" + String(deltaSec, 2) + "s</strong></td>";
+      html += "<td style='color:#ffff00;font-weight:bold'>0x" + String(f.addr, HEX) + "</td>";
+      html += "<td style='color:#ff00ff;font-weight:bold'>0x" + String(f.func, HEX) + "</td>";
       html += "<td class='" + regClass + "'><strong>" + String(f.reg) + "</strong></td>";
       html += "<td><strong>0x" + String(f.val, HEX) + "</strong></td>";
       html += "<td style='font-size:0.9em'>" + decode + "</td>";
-      html += "<td><select style='padding:4px;font-size:0.85em'>";
-      html += "<option value=''>--</option>";
-      html += "<option value='Accendi CALDO'>Accendi CALDO</option>";
-      html += "<option value='Accendi FREDDO'>Accendi FREDDO</option>";
-      html += "<option value='Spegni'>Spegni</option>";
-      html += "<option value='Temp +'>Temp +</option>";
-      html += "<option value='Temp -'>Temp -</option>";
-      html += "<option value='Fan AUTO'>Fan AUTO</option>";
-      html += "<option value='Fan MIN'>Fan MIN</option>";
-      html += "<option value='Fan MAX'>Fan MAX</option>";
-      html += "</select></td>";
-      html += "<td><button onclick='copyCmd(" + String(f.reg) + ",0x" + String(f.val, HEX) + ")' style='background:#555;color:#0f0;padding:4px 8px;border:none;border-radius:4px;cursor:pointer;font-size:0.8em'>COPIA</button></td>";
+      html += "<td style='font-family:monospace;font-size:0.8em;color:#00ff00'>" + String(f.rawHex) + "</td>";
       html += "<td>" + lrcMark + "</td>";
       html += "</tr>";
     }
@@ -864,7 +948,8 @@ void initRS485() {
   digitalWrite(RS485_SHUTDOWN_PIN, HIGH);
   pinMode(RS485_RE_PIN, OUTPUT);
   digitalWrite(RS485_RE_PIN, HIGH);
-  RS485.begin(BAUD_RATE, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
+  RS485.begin(currentBaudRate, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
+  Serial.printf("[RS485] Inizializzato a %lu baud\n", currentBaudRate);
   delay(200);
 }
 
@@ -913,6 +998,8 @@ void setup() {
     server.on("/api/mode", HTTP_GET, handleMode);
     server.on("/api/reg", HTTP_GET, handleReg);
     server.on("/api/commands", HTTP_GET, handleCommands);
+    server.on("/api/baudrate", HTTP_POST, handleBaudrate);
+    server.on("/api/baudrate", HTTP_GET, handleBaudrate);
     server.on("/test", handleTest);
     server.on("/sniffer", handleSniffer);
     server.on("/api/reset-sniffer", HTTP_GET, handleResetSniffer);
